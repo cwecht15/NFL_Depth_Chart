@@ -322,6 +322,9 @@ select { min-width: 100px; }
 
 /* Per-column min widths so text inputs aren't truncated to "Marvin H". */
 .tbl th[data-col="displayName"],        .tbl td[data-col="displayName"]        { min-width: 200px; }
+.tbl th[data-col="firstName"],          .tbl td[data-col="firstName"]          { min-width: 110px; }
+.tbl th[data-col="lastName"],           .tbl td[data-col="lastName"]           { min-width: 120px; }
+.tbl th[data-col="footballName"],       .tbl td[data-col="footballName"]       { min-width: 120px; }
 .tbl th[data-col="statusDescription"],  .tbl td[data-col="statusDescription"]  { min-width: 180px; }
 .tbl th[data-col="injury"],             .tbl td[data-col="injury"]             { min-width: 180px; }
 .tbl th[data-col="injuryReturnTarget"], .tbl td[data-col="injuryReturnTarget"] { min-width: 130px; }
@@ -332,7 +335,7 @@ select { min-width: 100px; }
 .tbl th[data-col="team"],               .tbl td[data-col="team"]               { min-width: 80px; }
 .tbl th[data-col="status"],             .tbl td[data-col="status"]             { min-width: 110px; }
 .tbl th[data-col="jersey"],             .tbl td[data-col="jersey"]             { width: 60px; }
-.tbl th[data-col="position"],           .tbl td[data-col="position"]           { width: 70px; }
+.tbl th[data-col="position"],           .tbl td[data-col="position"]           { min-width: 95px; }
 
 .cell-input {
   background: transparent;
@@ -379,10 +382,18 @@ select { min-width: 100px; }
 }
 
 .add-row h3 {
-  margin: 0 0 10px;
+  margin: 0 0 4px;
   color: var(--text-heading);
   font-size: 0.95rem;
 }
+
+.add-row__hint {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.add-row__hint strong { color: var(--text-primary); }
 
 .add-row__grid {
   display: grid;

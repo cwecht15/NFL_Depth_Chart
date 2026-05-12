@@ -17,10 +17,10 @@ const CATEGORY_ORDER = ["OFF", "DEF", "ST", "IR", "SUS", "PS"];
 
 const MANUAL_KEYS = new Set([
   "eliasId", "gsisId", "jersey", "team", "status", "statusDescription",
-  "nflId", "depthPosition", "depthPositionCategory",
+  "nflId", "position", "depthPosition", "depthPositionCategory",
   "injury", "injuryReturnTarget", "injuryStatus",
   "isEdge", "freeAgentSigning", "isTradeAcquisition",
-  "displayName",
+  "displayName", "firstName", "lastName", "footballName",
 ]);
 
 const BOOL_KEYS = new Set(["isEdge", "freeAgentSigning", "isTradeAcquisition"]);
@@ -29,6 +29,9 @@ const DISPLAY_COLUMNS = [
   "depthOrder",
   "depthPosition",
   "displayName",
+  "firstName",
+  "lastName",
+  "footballName",
   "team",
   "jersey",
   "eliasId",
@@ -375,6 +378,9 @@ function renderEditableCell(r, key) {
   if (key === "depthPosition") {
     return renderSelectCell(r, key, val, state.snapshot.options.depthPosition || []);
   }
+  if (key === "position") {
+    return renderSelectCell(r, key, val, state.snapshot.options.position || []);
+  }
   if (key === "team") {
     return renderSelectCell(r, key, val, teamList());
   }
@@ -491,9 +497,10 @@ function updateEditCount() {
 // ---------------------------------------------------------------------------
 
 function populateAddPositionDropdown() {
-  const sel = document.getElementById("add-depth-position");
+  // Now populates the `position` dropdown (was depthPosition before).
+  const sel = document.getElementById("add-position");
   sel.innerHTML = "";
-  const opts = state.snapshot.options.depthPosition || [];
+  const opts = state.snapshot.options.position || [];
   const blank = document.createElement("option");
   blank.value = ""; blank.textContent = "—";
   sel.appendChild(blank);
@@ -505,40 +512,70 @@ function populateAddPositionDropdown() {
 }
 
 function populateRosterSuggestions() {
+  // Pulls the *full* Rosters tab and exposes it as a datalist. Labels show
+  // "Name (TEAM)" so the user can disambiguate two players with the same
+  // name on different teams.
   const list = document.getElementById("roster-suggestions");
   list.innerHTML = "";
   const rosters = state.snapshot.rosters;
   if (!rosters || !rosters.rows) return;
   const nameIdx = rosters.headers.indexOf("displayName");
+  const teamIdx = rosters.headers.indexOf("teamAbbreviation");
   if (nameIdx < 0) return;
-  // De-dupe.
   const seen = new Set();
   for (const r of rosters.rows) {
     const n = r[nameIdx];
-    if (n && !seen.has(n)) { seen.add(n); const o = document.createElement("option"); o.value = n; list.appendChild(o); }
+    if (!n) continue;
+    const t = teamIdx >= 0 ? (r[teamIdx] || "") : "";
+    const key = `${n}|${t}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const o = document.createElement("option");
+    o.value = n;
+    if (t) o.label = `${n} (${t})`;
+    list.appendChild(o);
   }
+}
+
+function _rosterMatch(name) {
+  // Strict: returns the Rosters row whose displayName matches exactly, or null.
+  const rosters = state.snapshot.rosters;
+  if (!rosters || !rosters.rows) return null;
+  const nameIdx = rosters.headers.indexOf("displayName");
+  if (nameIdx < 0) return null;
+  const match = rosters.rows.find(r => r[nameIdx] === name);
+  if (!match) return null;
+  const idx = (k) => rosters.headers.indexOf(k);
+  return {
+    displayName: name,
+    eliasId:   idx("esbId")   >= 0 ? (match[idx("esbId")]   || "") : "",
+    gsisId:    idx("gsisId")  >= 0 ? (match[idx("gsisId")]  || "") : "",
+    firstName: idx("firstName") >= 0 ? (match[idx("firstName")] || "") : "",
+    lastName:  idx("lastName")  >= 0 ? (match[idx("lastName")]  || "") : "",
+    jersey:    idx("jersey")  >= 0 ? (match[idx("jersey")]  || "") : "",
+    teamAbbreviation: idx("teamAbbreviation") >= 0 ? (match[idx("teamAbbreviation")] || "") : "",
+  };
 }
 
 function onAddPlayer() {
   const team = state.currentTeam;
   const name = document.getElementById("add-player-search").value.trim();
-  const pos = document.getElementById("add-depth-position").value;
-  const cat = document.getElementById("add-category").value;
-  if (!name) { toast("Pick a player or type a name."); return; }
+  const pos  = document.getElementById("add-position").value;
+  const cat  = document.getElementById("add-category").value;
+  if (!name) { toast("Pick a player from the Rosters list."); return; }
 
-  // Try to resolve eliasId/gsisId from Rosters.
-  const rosters = state.snapshot.rosters;
-  const nameIdx = rosters.headers.indexOf("displayName");
-  const esbIdx  = rosters.headers.indexOf("esbId");
-  const gsisIdx = rosters.headers.indexOf("gsisId");
-  let eliasId = "", gsisId = "";
-  if (nameIdx >= 0) {
-    const match = rosters.rows.find(r => r[nameIdx] === name);
-    if (match) {
-      eliasId = (esbIdx >= 0 ? match[esbIdx] : "") || "";
-      gsisId  = (gsisIdx >= 0 ? match[gsisIdx] : "") || "";
-    }
+  // Strict: the typed/selected name must exist in Rosters. Refusing free
+  // text prevents typos and forces the "register a placeholder" workflow to
+  // be the explicit way to add unsigned/rookie players.
+  const r = _rosterMatch(name);
+  if (!r) {
+    toast(`"${name}" is not in the Rosters tab. Refresh the snapshot or pick from the suggestions.`);
+    return;
   }
+
+  // footballName = first whitespace-separated token of displayName (mirrors
+  // the LEFT(F, FIND(" ", F)-1) formula in the sheet).
+  const footballName = r.firstName || (name.split(/\s+/)[0] || "");
 
   // Allocate a virtual sheet_row above all existing data.
   const maxRow = Math.max(...state.rows.map(r => Number(r._sheet_row) || 0), 100000);
@@ -546,17 +583,27 @@ function onAddPlayer() {
     _sheet_row: maxRow + 1,
     team,
     displayName: name,
-    depthPosition: pos,
+    firstName: r.firstName,
+    lastName: r.lastName,
+    footballName,
+    position: pos,
+    depthPosition: pos,            // default to the position; user can refine to LWR/SWR/RWR
     depthPositionCategory: cat,
-    eliasId,
-    gsisId,
+    eliasId: r.eliasId,
+    gsisId: r.gsisId,
+    jersey: r.jersey,
     _new: true,
   };
   state.rows.push(newRow);
 
-  // Log each field as an "edit" so the diff/export sees the new row.
+  // Log each non-empty field as an "edit" so the diff/export sees the new row.
   const ts = new Date().toISOString();
-  for (const k of ["team", "displayName", "depthPosition", "depthPositionCategory", "eliasId", "gsisId"]) {
+  const fields = [
+    "team", "displayName", "firstName", "lastName", "footballName",
+    "position", "depthPosition", "depthPositionCategory",
+    "eliasId", "gsisId", "jersey",
+  ];
+  for (const k of fields) {
     if (newRow[k] === "" || newRow[k] === undefined) continue;
     state.edits.push({ sheet_row: newRow._sheet_row, column: k, before: "", after: newRow[k], ts, who: state.authedEmail || "anon" });
   }
