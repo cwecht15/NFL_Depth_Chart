@@ -52,7 +52,18 @@ jobs:
           git add docs/data/snapshot.json
           if git diff --staged --quiet; then
             echo "No changes; skipping commit."
-          else
-            git commit -m "snapshot: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            git push
+            exit 0
           fi
+          git commit -m "snapshot: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # Retry in case the ourlads or snapshot bot pushed concurrently.
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin main || true
+            if git push origin main; then
+              echo "Push succeeded on attempt $i."
+              exit 0
+            fi
+            echo "Push attempt $i rejected; rebasing and retrying..."
+            sleep $((i * 2))
+          done
+          echo "All push attempts failed." >&2
+          exit 1
