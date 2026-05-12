@@ -167,19 +167,28 @@ def _is_trailing_note(token: str) -> bool:
     return False
 
 
+_INLINE_CODE = re.compile(r"^[A-Z]{1,3}\d{1,2}$")
+
 def _clean_player(text: str) -> str:
     """Clean up an OurLads player cell into 'First Last (suffix)'.
 
-    OurLads renders names as 'Last, First' with trailing jersey/status notes.
-    We strip the notes and flip the comma so the result matches the sheet's
-    `displayName` convention used in DepthCharts.
+    OurLads renders names as 'Last, First' with trailing jersey/status notes,
+    and sometimes interleaves a draft-status code mid-name (e.g., "Bryson
+    CF25 Green" = College Free agent 2025). We strip both and flip the
+    comma so the result matches the sheet's `displayName` convention.
     """
     s = re.sub(r"\s+", " ", text.strip())
     tokens = s.split(" ")
+
+    # 1) Drop trailing jersey/status notes.
     while tokens and _is_trailing_note(tokens[-1]):
         tokens.pop()
+
+    # 2) Drop mid-name OurLads codes like "CF25", "SF26", "WV24".
+    tokens = [t for t in tokens if not _INLINE_CODE.match(t)]
+
     s = " ".join(tokens)
-    # Flip "Last, First" → "First Last".
+    # 3) Flip "Last, First" → "First Last".
     if "," in s:
         last, _, first = s.partition(",")
         last = last.strip().rstrip(",")
