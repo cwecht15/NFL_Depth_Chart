@@ -265,16 +265,24 @@ function renderTeamView() {
   }
 
   const teamRows = rowsForTeam(team).filter(r => (r.depthPositionCategory || "OFF") === cat);
-  // Group by depthPosition
+  // Group by `position` (e.g., LWR/SWR/RWR all collapse to WR). Falls back
+  // to `depthPosition` for rows where `position` hasn't been filled in.
   const groups = new Map();
   for (const r of teamRows) {
-    const k = r.depthPosition || "(unset)";
+    const k = (r.position || r.depthPosition || "(unset)").trim() || "(unset)";
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(r);
   }
 
   for (const [pos, rows] of groups) {
-    rows.sort((a, b) => num(a.depthOrder) - num(b.depthOrder));
+    // Within a group, sort by depthPosition first (so LWR rows come before
+    // RWR rows before SWR rows), then by depth order within each subrole.
+    rows.sort((a, b) => {
+      const dpA = (a.depthPosition || "").trim();
+      const dpB = (b.depthPosition || "").trim();
+      if (dpA !== dpB) return dpA.localeCompare(dpB);
+      return num(a.depthOrder) - num(b.depthOrder);
+    });
     content.appendChild(renderPositionCard(pos, rows));
   }
 }
@@ -296,6 +304,7 @@ function renderPositionCard(pos, rows) {
   for (const c of DISPLAY_COLUMNS) {
     const th = document.createElement("th");
     th.textContent = c;
+    th.dataset.col = c;
     trh.appendChild(th);
   }
   thead.appendChild(trh);
@@ -317,6 +326,7 @@ function renderRow(r) {
 
   for (const key of DISPLAY_COLUMNS) {
     const td = document.createElement("td");
+    td.dataset.col = key;
     if (key === "depthOrder") td.classList.add("col--order");
     if (key === "eliasId" || key === "gsisId" || key === "playerId") td.classList.add("col--id");
     if (key === "displayName") td.classList.add("col--name");

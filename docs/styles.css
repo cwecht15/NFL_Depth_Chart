@@ -300,6 +300,20 @@ select { min-width: 100px; }
 .tbl td.col--name  { font-weight: 600; color: var(--text-heading); }
 .tbl td.col--readonly { color: var(--text-muted); }
 
+/* Per-column min widths so text inputs aren't truncated to "Marvin H". */
+.tbl th[data-col="displayName"],        .tbl td[data-col="displayName"]        { min-width: 200px; }
+.tbl th[data-col="statusDescription"],  .tbl td[data-col="statusDescription"]  { min-width: 180px; }
+.tbl th[data-col="injury"],             .tbl td[data-col="injury"]             { min-width: 180px; }
+.tbl th[data-col="injuryReturnTarget"], .tbl td[data-col="injuryReturnTarget"] { min-width: 130px; }
+.tbl th[data-col="injuryStatus"],       .tbl td[data-col="injuryStatus"]       { min-width: 140px; }
+.tbl th[data-col="eliasId"],            .tbl td[data-col="eliasId"]            { min-width: 115px; }
+.tbl th[data-col="gsisId"],             .tbl td[data-col="gsisId"]             { min-width: 115px; }
+.tbl th[data-col="depthPosition"],      .tbl td[data-col="depthPosition"]      { min-width: 100px; }
+.tbl th[data-col="team"],               .tbl td[data-col="team"]               { min-width: 80px; }
+.tbl th[data-col="status"],             .tbl td[data-col="status"]             { min-width: 110px; }
+.tbl th[data-col="jersey"],             .tbl td[data-col="jersey"]             { width: 60px; }
+.tbl th[data-col="position"],           .tbl td[data-col="position"]           { width: 70px; }
+
 .cell-input {
   background: transparent;
   color: var(--text-primary);
@@ -309,7 +323,7 @@ select { min-width: 100px; }
   font-family: inherit;
   font-size: 0.85rem;
   width: 100%;
-  min-width: 70px;
+  min-width: 60px;
 }
 .cell-input:hover { border-color: var(--border-primary); }
 .cell-input:focus { outline: none; border-color: var(--accent); background: rgba(255,255,255,0.04); }
