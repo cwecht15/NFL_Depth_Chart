@@ -403,7 +403,14 @@ select { min-width: 100px; }
 }
 
 .add-row__grid--custom {
-  grid-template-columns: minmax(220px, 2fr) minmax(140px, 1fr) minmax(140px, 1fr) minmax(110px, 0.8fr) minmax(140px, 1fr) auto;
+  grid-template-columns:
+    minmax(200px, 2fr)   /* name */
+    minmax(120px, 1fr)   /* position */
+    minmax(120px, 1fr)   /* category */
+    minmax(100px, 0.7fr) /* jersey */
+    minmax(130px, 1fr)   /* elias placeholder */
+    minmax(130px, 1fr)   /* gsis placeholder */
+    auto;                /* button */
 }
 
 .add-row--custom {

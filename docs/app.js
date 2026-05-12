@@ -214,10 +214,23 @@ function renderShell() {
   document.getElementById("add-custom-btn").addEventListener("click", onAddCustomPlayer);
   document.getElementById("signout-btn").addEventListener("click", signOut);
 
-  // Pre-fill the next ROOKIE### slot whenever the user focuses the field.
-  document.getElementById("add-custom-id").addEventListener("focus", (e) => {
-    if (!e.target.value) e.target.value = nextPlaceholderId();
-  });
+  // Pre-fill the next ROOKIE### slot whenever the user focuses either
+  // placeholder field. Defaults both to the same number so the common case
+  // (same placeholder across Elias + GSIS) is one click each.
+  const fillPlaceholder = (e) => {
+    if (e.target.value) return;
+    const elias = document.getElementById("add-custom-elias");
+    const gsis  = document.getElementById("add-custom-gsis");
+    // If the other field already has a ROOKIE### value, reuse that number.
+    const otherVal = (e.target.id === "add-custom-elias" ? gsis.value : elias.value).trim();
+    if (otherVal && /^ROOKIE\d+$/i.test(otherVal)) {
+      e.target.value = otherVal.toUpperCase();
+    } else {
+      e.target.value = nextPlaceholderId();
+    }
+  };
+  document.getElementById("add-custom-elias").addEventListener("focus", fillPlaceholder);
+  document.getElementById("add-custom-gsis").addEventListener("focus", fillPlaceholder);
 
   // Warnings panel handlers.
   document.getElementById("warnings-toggle").addEventListener("click", () => openWarnings(true));
@@ -671,11 +684,22 @@ function onAddCustomPlayer() {
   const pos  = document.getElementById("add-custom-position").value;
   const cat  = document.getElementById("add-custom-category").value;
   const jersey = document.getElementById("add-custom-jersey").value.trim();
-  let idVal = document.getElementById("add-custom-id").value.trim();
+  let eliasId = document.getElementById("add-custom-elias").value.trim();
+  let gsisId  = document.getElementById("add-custom-gsis").value.trim();
 
   if (!name) { toast("Custom player needs at least a name."); return; }
   if (!pos)  { toast("Pick a position for the custom player."); return; }
-  if (!idVal) idVal = nextPlaceholderId();
+
+  // Default any blank ID field to the next ROOKIE### slot. If only one of
+  // the two is blank, reuse the other so the row keeps the same number.
+  if (!eliasId && !gsisId) {
+    eliasId = nextPlaceholderId();
+    gsisId  = eliasId;
+  } else if (!eliasId) {
+    eliasId = /^ROOKIE\d+$/i.test(gsisId) ? gsisId.toUpperCase() : nextPlaceholderId();
+  } else if (!gsisId) {
+    gsisId  = /^ROOKIE\d+$/i.test(eliasId) ? eliasId.toUpperCase() : nextPlaceholderId();
+  }
 
   // Derive name parts.
   const tokens = name.split(/\s+/).filter(Boolean);
@@ -695,8 +719,8 @@ function onAddCustomPlayer() {
     position: pos,
     depthPosition: pos,
     depthPositionCategory: cat,
-    eliasId: idVal,
-    gsisId: idVal,                  // same placeholder for both ID columns
+    eliasId,
+    gsisId,
     jersey,
     _new: true,
     _custom: true,
@@ -725,9 +749,10 @@ function onAddCustomPlayer() {
   // Reset the custom form.
   document.getElementById("add-custom-name").value = "";
   document.getElementById("add-custom-jersey").value = "";
-  document.getElementById("add-custom-id").value = "";
+  document.getElementById("add-custom-elias").value = "";
+  document.getElementById("add-custom-gsis").value = "";
 
-  toast(`Added custom player ${name} to ${team} with placeholder ID ${idVal}.`);
+  toast(`Added ${name} to ${team} (Elias=${eliasId}, GSIS=${gsisId}).`);
 }
 
 // ---------------------------------------------------------------------------
