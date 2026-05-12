@@ -25,6 +25,12 @@ SPREADSHEET_ID = "1XHXiR__p7h2JVLKNkS-F9aiKZjhar78YubQklW_baQA"
 DEPTHCHARTS_TAB = "DepthCharts"
 ROSTERS_TAB = "Rosters"
 OPTIONS_TAB = "Options"
+TRANSACTIONS_TAB = "Transactions_New"
+
+# Cap on the number of Transactions_New rows shipped to the frontend.
+# Most recent N rows are kept. The frontend decides which to render based
+# on its own age cutoff.
+TRANSACTIONS_MAX_ROWS = 1500
 
 DC_HEADER_NOTE_ROW = 4  # 1-based
 DC_HUMAN_HEADER_ROW = 3
@@ -169,6 +175,32 @@ def _shrink_rosters(rosters: dict) -> dict:
     return {"headers": new_headers, "rows": new_rows}
 
 
+def _load_transactions(svc) -> dict[str, Any]:
+    """Load the Transactions_New tab, keep newest rows."""
+    tab = _load_tab(svc, TRANSACTIONS_TAB, "A1:AZ")
+    headers = tab["headers"]
+    rows = tab["rows"]
+    if not headers:
+        return {"headers": [], "rows": []}
+
+    # Find date column for newest-first sort.
+    try:
+        date_idx = headers.index("date")
+    except ValueError:
+        date_idx = -1
+
+    def row_date(r):
+        if date_idx < 0 or date_idx >= len(r):
+            return ""
+        return (r[date_idx] or "").strip()[:10]
+
+    # Drop entirely-empty rows.
+    rows = [r for r in rows if any((c or "").strip() for c in r)]
+    # Newest-first.
+    rows.sort(key=row_date, reverse=True)
+    return {"headers": headers, "rows": rows[:TRANSACTIONS_MAX_ROWS]}
+
+
 def _options_catalog(options_tab: dict) -> dict[str, list[str]]:
     """Pull out catalog lists by column index, matching the live Options tab."""
     headers = options_tab["headers"]
@@ -209,12 +241,17 @@ def main() -> int:
     options = _options_catalog(options_tab)
     print(f"  catalog sizes: { {k: len(v) for k, v in options.items()} }", flush=True)
 
+    print("Loading Transactions_New (newest first)...", flush=True)
+    transactions = _load_transactions(svc)
+    print(f"  rows kept (cap {TRANSACTIONS_MAX_ROWS}): {len(transactions['rows'])}", flush=True)
+
     snapshot = {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "spreadsheet_id": SPREADSHEET_ID,
         "depth": depth,
         "rosters": rosters,
         "options": options,
+        "transactions": transactions,
     }
 
     payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

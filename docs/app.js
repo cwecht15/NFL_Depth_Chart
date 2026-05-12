@@ -48,6 +48,10 @@ const DISPLAY_COLUMNS = [
 ];
 
 const LS_KEY = "depthchart_edits_v1";
+const LS_DISMISSED = "depthchart_dismissed_warnings_v1";
+
+// How recent a transaction must be (in days) to surface as a warning.
+const TRANSACTION_WARN_DAYS = 60;
 
 // ---------------------------------------------------------------------------
 // State
@@ -63,6 +67,10 @@ const state = {
   currentCategory: null,
   authedEmail: null,
   authConfig: null,
+  warnings: [],
+  dismissedWarningIds: new Set(),
+  warningFilter: "all",
+  ourlads: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -94,8 +102,12 @@ async function launchApp() {
   state.baseline = new Map(snap.depth.rows.map(r => [r._sheet_row, { ...r }]));
   setSnapshotAgeBadge(snap.generated_at);
 
+  // Optional: load OurLads snapshot if the workflow has committed one.
+  state.ourlads = await tryFetchJSON("./data/ourlads.json");
+
   // Replay locally-stored edits, if any.
   restoreEditsFromLocalStorage();
+  restoreDismissedWarnings();
 
   // Render the app shell into <main>.
   renderShell();
@@ -113,8 +125,12 @@ async function launchApp() {
   }
   document.getElementById("team-select").value = state.currentTeam;
   document.getElementById("add-row-team").textContent = state.currentTeam;
+  document.getElementById("add-custom-team").textContent = state.currentTeam;
   renderTeamView();
   updateEditCount();
+
+  // Compute and render warnings.
+  rebuildWarnings();
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +180,7 @@ function renderShell() {
     state.currentCategory = null;
     localStorage.setItem("depthchart_team", state.currentTeam);
     document.getElementById("add-row-team").textContent = state.currentTeam;
+    document.getElementById("add-custom-team").textContent = state.currentTeam;
     renderTeamView();
   });
 
@@ -194,7 +211,24 @@ function renderShell() {
   document.getElementById("export-csv-btn").addEventListener("click", exportEditedCSV);
   document.getElementById("export-json-btn").addEventListener("click", exportDiffJSON);
   document.getElementById("add-player-btn").addEventListener("click", onAddPlayer);
+  document.getElementById("add-custom-btn").addEventListener("click", onAddCustomPlayer);
   document.getElementById("signout-btn").addEventListener("click", signOut);
+
+  // Pre-fill the next ROOKIE### slot whenever the user focuses the field.
+  document.getElementById("add-custom-id").addEventListener("focus", (e) => {
+    if (!e.target.value) e.target.value = nextPlaceholderId();
+  });
+
+  // Warnings panel handlers.
+  document.getElementById("warnings-toggle").addEventListener("click", () => openWarnings(true));
+  document.getElementById("warnings-close").addEventListener("click", () => openWarnings(false));
+  document.getElementById("warnings-scrim").addEventListener("click", () => openWarnings(false));
+  document.getElementById("warnings-filters").addEventListener("click", (e) => {
+    const btn = e.target.closest("button.chip");
+    if (!btn) return;
+    state.warningFilter = btn.dataset.filter || "all";
+    renderWarnings();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +364,7 @@ function renderPositionCard(pos, rows) {
 
 function renderRow(r) {
   const tr = document.createElement("tr");
+  tr.dataset.sheetRow = String(r._sheet_row);
   if (state.editedRowKeys.has(r._sheet_row)) tr.classList.add("row--edited");
   if (isPlaceholder(r.eliasId)) tr.classList.add("row--placeholder");
 
@@ -439,13 +474,10 @@ function recordEdit(row, key, newValue) {
   });
   persistEdits();
   updateEditCount();
-  // Visual touch-up without re-rendering the whole grid.
-  const trs = document.querySelectorAll(`.tbl tbody tr`);
-  for (const tr of trs) {
-    // No reliable selector; cheap re-render keeps this simple.
-  }
-  // Light re-render: only the current view.
+  // Cheap re-render of the current team view.
   renderTeamView();
+  // Recompute warnings since edits may now resolve some.
+  rebuildWarnings();
 }
 
 function persistEdits() {
@@ -497,18 +529,36 @@ function updateEditCount() {
 // ---------------------------------------------------------------------------
 
 function populateAddPositionDropdown() {
-  // Now populates the `position` dropdown (was depthPosition before).
-  const sel = document.getElementById("add-position");
-  sel.innerHTML = "";
+  // Populates BOTH add-player position dropdowns (Rosters-backed + custom).
   const opts = state.snapshot.options.position || [];
-  const blank = document.createElement("option");
-  blank.value = ""; blank.textContent = "—";
-  sel.appendChild(blank);
-  for (const o of opts) {
-    const opt = document.createElement("option");
-    opt.value = o; opt.textContent = o;
-    sel.appendChild(opt);
+  for (const id of ["add-position", "add-custom-position"]) {
+    const sel = document.getElementById(id);
+    if (!sel) continue;
+    sel.innerHTML = "";
+    const blank = document.createElement("option");
+    blank.value = ""; blank.textContent = "—";
+    sel.appendChild(blank);
+    for (const o of opts) {
+      const opt = document.createElement("option");
+      opt.value = o; opt.textContent = o;
+      sel.appendChild(opt);
+    }
   }
+}
+
+function nextPlaceholderId() {
+  // Scan eliasIds for ROOKIE### in current rows + any edits already adding new ones.
+  let max = 0;
+  const seenIds = new Set();
+  for (const r of state.rows) {
+    if (r.eliasId) seenIds.add(String(r.eliasId).toUpperCase());
+    if (r.gsisId)  seenIds.add(String(r.gsisId).toUpperCase());
+  }
+  for (const id of seenIds) {
+    const m = id.match(/^ROOKIE(\d+)$/);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return `ROOKIE${String(max + 1).padStart(3, "0")}`;
 }
 
 function populateRosterSuggestions() {
@@ -615,6 +665,71 @@ function onAddPlayer() {
   toast(`Added ${name} to ${team} (in-memory).`);
 }
 
+function onAddCustomPlayer() {
+  const team = state.currentTeam;
+  const name = document.getElementById("add-custom-name").value.trim();
+  const pos  = document.getElementById("add-custom-position").value;
+  const cat  = document.getElementById("add-custom-category").value;
+  const jersey = document.getElementById("add-custom-jersey").value.trim();
+  let idVal = document.getElementById("add-custom-id").value.trim();
+
+  if (!name) { toast("Custom player needs at least a name."); return; }
+  if (!pos)  { toast("Pick a position for the custom player."); return; }
+  if (!idVal) idVal = nextPlaceholderId();
+
+  // Derive name parts.
+  const tokens = name.split(/\s+/).filter(Boolean);
+  const firstName = tokens[0] || "";
+  const lastName  = tokens.length > 1 ? tokens.slice(1).join(" ") : "";
+  const footballName = firstName;
+
+  // Allocate a virtual sheet_row above all existing data.
+  const maxRow = Math.max(...state.rows.map(r => Number(r._sheet_row) || 0), 100000);
+  const newRow = {
+    _sheet_row: maxRow + 1,
+    team,
+    displayName: name,
+    firstName,
+    lastName,
+    footballName,
+    position: pos,
+    depthPosition: pos,
+    depthPositionCategory: cat,
+    eliasId: idVal,
+    gsisId: idVal,                  // same placeholder for both ID columns
+    jersey,
+    _new: true,
+    _custom: true,
+  };
+  state.rows.push(newRow);
+
+  const ts = new Date().toISOString();
+  const fields = [
+    "team", "displayName", "firstName", "lastName", "footballName",
+    "position", "depthPosition", "depthPositionCategory",
+    "eliasId", "gsisId", "jersey",
+  ];
+  for (const k of fields) {
+    if (newRow[k] === "" || newRow[k] === undefined) continue;
+    state.edits.push({
+      sheet_row: newRow._sheet_row, column: k,
+      before: "", after: newRow[k], ts,
+      who: state.authedEmail || "anon",
+    });
+  }
+  state.editedRowKeys.add(newRow._sheet_row);
+  persistEdits();
+  updateEditCount();
+  renderTeamView();
+
+  // Reset the custom form.
+  document.getElementById("add-custom-name").value = "";
+  document.getElementById("add-custom-jersey").value = "";
+  document.getElementById("add-custom-id").value = "";
+
+  toast(`Added custom player ${name} to ${team} with placeholder ID ${idVal}.`);
+}
+
 // ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
@@ -661,6 +776,461 @@ function download(name, data, mime) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ---------------------------------------------------------------------------
+// Warnings (transactions vs current depth chart, OurLads vs current chart)
+// ---------------------------------------------------------------------------
+//
+// Read-only: warnings never mutate the depth chart. The user fixes the
+// underlying row manually (and the warning then disappears on next rebuild)
+// or dismisses the warning (id stored in localStorage so it stays gone).
+
+const TX_KEY_FIELDS = [
+  "date", "transactionType", "teamAbbr",
+  "person_displayName", "person_gsisId",
+];
+
+function _txField(row, headers, name) {
+  const i = headers.indexOf(name);
+  return i >= 0 && i < row.length ? (row[i] || "") : "";
+}
+
+function _normalizeName(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[.,'’`]/g, "")
+    .replace(/\b(jr|sr|ii|iii|iv)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function _daysAgo(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return Infinity;
+  return (Date.now() - t) / (24 * 3600 * 1000);
+}
+
+function _rowsByName() {
+  // Index current rows by normalized displayName so warnings can find them
+  // even when displayName has minor punctuation differences.
+  const map = new Map();
+  for (const r of state.rows) {
+    const k = _normalizeName(r.displayName);
+    if (!k) continue;
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(r);
+  }
+  return map;
+}
+
+function _rowsByGsisId() {
+  const map = new Map();
+  for (const r of state.rows) {
+    const g = (r.gsisId || "").trim();
+    if (!g) continue;
+    if (!map.has(g)) map.set(g, []);
+    map.get(g).push(r);
+  }
+  return map;
+}
+
+// --- Transaction warnings --------------------------------------------------
+
+function computeTransactionWarnings() {
+  const tx = state.snapshot.transactions;
+  if (!tx || !tx.rows || !tx.headers) return [];
+  const headers = tx.headers;
+  const byName = _rowsByName();
+  const byGsis = _rowsByGsisId();
+  const out = [];
+
+  for (const r of tx.rows) {
+    const date = _txField(r, headers, "date");
+    if (_daysAgo(date) > TRANSACTION_WARN_DAYS) continue;
+
+    const type      = _txField(r, headers, "transactionType");
+    const teamAbbr  = _txField(r, headers, "teamAbbr");
+    const name      = _txField(r, headers, "person_displayName");
+    const gsisId    = _txField(r, headers, "person_gsisId");
+    const desc      = _txField(r, headers, "description");
+
+    if (!name && !gsisId) continue;
+
+    // Find matching rows. Prefer gsisId, fall back to normalized name.
+    let matches = [];
+    if (gsisId && byGsis.has(gsisId)) matches = byGsis.get(gsisId);
+    if (matches.length === 0 && name) matches = byName.get(_normalizeName(name)) || [];
+
+    const expect = _expectedStateForTx(type, teamAbbr);
+    if (!expect) continue;
+
+    const id = `tx|${date}|${(gsisId || _normalizeName(name)).replace(/\s+/g, "_")}|${type}`;
+
+    if (matches.length === 0) {
+      // Player not present in our chart at all.
+      if (expect.shouldExistOnTeam) {
+        out.push({
+          id, source: "transactions",
+          team: teamAbbr, player: name || gsisId,
+          date,
+          title: `${expect.label}: not in chart`,
+          detail: `${date}: ${desc || type}. No row in DepthCharts for ${name || gsisId}.`,
+        });
+      }
+      continue;
+    }
+
+    // Check expectation against each matching row.
+    for (const row of matches) {
+      const mismatch = _diagnoseMismatch(row, expect);
+      if (!mismatch) continue;
+      out.push({
+        id,
+        source: "transactions",
+        team: teamAbbr,
+        player: name || row.displayName,
+        date,
+        title: `${expect.label}: ${mismatch.summary}`,
+        detail: `${date}: ${desc || type}. ${mismatch.detail}`,
+        navigate: { team: row.team || teamAbbr, sheet_row: row._sheet_row },
+      });
+    }
+  }
+  return out;
+}
+
+function _expectedStateForTx(type, teamAbbr) {
+  const t = (type || "").toLowerCase();
+  if (t === "signings" || t === "practice-squad" || t === "active-roster") {
+    return {
+      label: t === "practice-squad" ? "Signed to PS" : "Signed",
+      shouldExistOnTeam: true,
+      teamShouldBe: teamAbbr,
+      statusContains: t === "practice-squad" ? "PS" : null,
+    };
+  }
+  if (t === "reserve-list") {
+    return {
+      label: "On IR per NFL.com",
+      shouldExistOnTeam: true,
+      teamShouldBe: teamAbbr,
+      statusContains: "IR",
+    };
+  }
+  if (t === "released" || t === "waivers" || t === "waived") {
+    return {
+      label: "Released per NFL.com",
+      shouldExistOnTeam: false,
+      teamShouldBe: "FA",
+    };
+  }
+  if (t === "trades") {
+    return {
+      label: "Traded",
+      shouldExistOnTeam: true,
+      teamShouldBe: teamAbbr,
+    };
+  }
+  if (t === "suspensions" || t === "suspended") {
+    return {
+      label: "Suspended per NFL.com",
+      teamShouldBe: teamAbbr,
+      statusContains: "SUS",
+    };
+  }
+  return null;
+}
+
+function _diagnoseMismatch(row, expect) {
+  // teamShouldBe: row.team must equal the expected team. "FA" is special.
+  if (expect.teamShouldBe) {
+    const t = (row.team || "").toUpperCase();
+    const e = expect.teamShouldBe.toUpperCase();
+    if (t !== e && _normalizeTeam(t) !== _normalizeTeam(e)) {
+      return {
+        summary: `team ${row.team || "(blank)"} != ${expect.teamShouldBe}`,
+        detail: `Row shows team=${row.team || "(blank)"} but transaction expects ${expect.teamShouldBe}.`,
+      };
+    }
+  }
+  if (expect.statusContains) {
+    const s = (row.status || row.statusDescription || "").toUpperCase();
+    if (!s.includes(expect.statusContains)) {
+      return {
+        summary: `status missing "${expect.statusContains}"`,
+        detail: `Row shows status="${row.status || "(blank)"}". Expected to contain "${expect.statusContains}".`,
+      };
+    }
+  }
+  return null;
+}
+
+function _normalizeTeam(t) {
+  // Some sheets use TV abbrevs (ARZ/BLT/CLV/HST/JAX/LA) where NFL.com uses
+  // ARI/BAL/CLE/HOU/JAX/LA. Treat these as the same.
+  const m = {
+    ARI: "ARZ", ARZ: "ARZ",
+    BAL: "BLT", BLT: "BLT",
+    CLE: "CLV", CLV: "CLV",
+    HOU: "HST", HST: "HST",
+    JAC: "JAX", JAX: "JAX",
+    LA:  "LA",  LAR: "LA",
+    OAK: "LV",  LV:  "LV",
+  };
+  const u = String(t || "").toUpperCase();
+  return m[u] || u;
+}
+
+// --- OurLads warnings ------------------------------------------------------
+
+function computeOurladsWarnings() {
+  const ol = state.ourlads;
+  if (!ol || !ol.teams) return [];
+  const byName = _rowsByName();
+  const out = [];
+
+  // OurLads schema (matches the scraper output below):
+  // { generated_at, teams: { "ARZ": [ {name, position, depth_position, depth_order}, ... ], ... } }
+
+  for (const [team, players] of Object.entries(ol.teams)) {
+    for (const p of players) {
+      const key = _normalizeName(p.name);
+      if (!key) continue;
+      const matches = byName.get(key) || [];
+
+      if (matches.length === 0) {
+        const id = `ol|missing|${_normalizeTeam(team)}|${key.replace(/\s+/g,"_")}`;
+        out.push({
+          id, source: "ourlads",
+          team, player: p.name,
+          title: `OurLads: present on ${team} ${p.position || ""}${p.depth_order ? "#" + p.depth_order : ""}`,
+          detail: `OurLads lists ${p.name} on ${team} (${p.position || "?"}${p.depth_position ? " / " + p.depth_position : ""}). No row in DepthCharts.`,
+        });
+        continue;
+      }
+
+      // Find a row on the same team if available.
+      const rowOnTeam = matches.find(r => _normalizeTeam(r.team) === _normalizeTeam(team)) || matches[0];
+
+      if (_normalizeTeam(rowOnTeam.team) !== _normalizeTeam(team)) {
+        const id = `ol|team|${_normalizeTeam(team)}|${key.replace(/\s+/g,"_")}`;
+        out.push({
+          id, source: "ourlads",
+          team, player: p.name,
+          title: `Team mismatch (OurLads ${team} vs ${rowOnTeam.team})`,
+          detail: `OurLads shows ${p.name} on ${team}; DepthCharts has ${rowOnTeam.team}.`,
+          navigate: { team: rowOnTeam.team, sheet_row: rowOnTeam._sheet_row },
+        });
+        continue;
+      }
+
+      // Position mismatch.
+      const olPos = (p.position || "").toUpperCase();
+      const rowPos = (rowOnTeam.position || "").toUpperCase();
+      if (olPos && rowPos && olPos !== rowPos) {
+        const id = `ol|pos|${_normalizeTeam(team)}|${key.replace(/\s+/g,"_")}`;
+        out.push({
+          id, source: "ourlads",
+          team, player: p.name,
+          title: `Position mismatch (OurLads ${olPos} vs ${rowPos})`,
+          detail: `OurLads shows ${p.name} as ${olPos}; DepthCharts has ${rowPos}.`,
+          navigate: { team: rowOnTeam.team, sheet_row: rowOnTeam._sheet_row },
+        });
+      }
+    }
+  }
+  return out;
+}
+
+// --- Orchestration ---------------------------------------------------------
+
+function rebuildWarnings() {
+  state.warnings = [
+    ...computeTransactionWarnings(),
+    ...computeOurladsWarnings(),
+  ];
+  renderWarnings();
+}
+
+function renderWarnings() {
+  const list = document.getElementById("warnings-list");
+  if (!list) return;
+
+  const dismissed = state.dismissedWarningIds;
+  const active   = state.warnings.filter(w => !dismissed.has(w.id));
+  const visible  = state.warnings.filter(w => {
+    switch (state.warningFilter) {
+      case "transactions": return !dismissed.has(w.id) && w.source === "transactions";
+      case "ourlads":      return !dismissed.has(w.id) && w.source === "ourlads";
+      case "dismissed":    return dismissed.has(w.id);
+      default:             return !dismissed.has(w.id);
+    }
+  });
+
+  // Update toggle.
+  const toggle = document.getElementById("warnings-toggle");
+  const countSpan = document.getElementById("warnings-count");
+  if (toggle && countSpan) {
+    countSpan.textContent = String(active.length);
+    if (active.length > 0) {
+      toggle.style.display = "inline-flex";
+      toggle.classList.add("has-active");
+    } else if (state.warnings.length > 0) {
+      // No active but some dismissed exist — keep the badge visible at 0.
+      toggle.style.display = "inline-flex";
+      toggle.classList.remove("has-active");
+    } else {
+      toggle.style.display = "none";
+    }
+  }
+
+  // Filter chip active state.
+  for (const chip of document.querySelectorAll("#warnings-filters .chip")) {
+    chip.classList.toggle("chip--active", chip.dataset.filter === state.warningFilter);
+  }
+
+  // Body.
+  list.innerHTML = "";
+  if (visible.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "warnings-empty";
+    empty.textContent = state.warningFilter === "dismissed"
+      ? "No dismissed warnings."
+      : "All clear — no external-source warnings.";
+    list.appendChild(empty);
+    return;
+  }
+
+  // Sort: undismissed first, then by team, then by source.
+  visible.sort((a, b) => {
+    const da = dismissed.has(a.id) ? 1 : 0;
+    const db = dismissed.has(b.id) ? 1 : 0;
+    if (da !== db) return da - db;
+    if (a.team !== b.team) return (a.team || "").localeCompare(b.team || "");
+    return (a.source || "").localeCompare(b.source || "");
+  });
+
+  for (const w of visible) {
+    list.appendChild(renderWarning(w, dismissed.has(w.id)));
+  }
+}
+
+function renderWarning(w, isDismissed) {
+  const el = document.createElement("article");
+  el.className = "warning warning--" + w.source + (isDismissed ? " warning--dismissed" : "");
+
+  const head = document.createElement("div");
+  head.className = "warning__head";
+  const src = document.createElement("span");
+  src.className = "warning__source";
+  src.textContent = w.source === "ourlads" ? "OurLads" : "NFL.com TX";
+  const team = document.createElement("span");
+  team.className = "warning__team";
+  team.textContent = w.team || "—";
+  head.append(src, team);
+  if (w.date) {
+    const date = document.createElement("span");
+    date.className = "warning__team";
+    date.textContent = w.date;
+    head.append(date);
+  }
+  el.appendChild(head);
+
+  const title = document.createElement("h3");
+  title.className = "warning__title";
+  title.textContent = `${w.player || "?"} — ${w.title}`;
+  el.appendChild(title);
+
+  const detail = document.createElement("p");
+  detail.className = "warning__detail";
+  detail.textContent = w.detail || "";
+  el.appendChild(detail);
+
+  const actions = document.createElement("div");
+  actions.className = "warning__actions";
+
+  if (w.navigate) {
+    const fix = document.createElement("button");
+    fix.className = "btn btn--primary";
+    fix.textContent = "Go to row";
+    fix.addEventListener("click", () => navigateToRow(w.navigate));
+    actions.appendChild(fix);
+  }
+
+  const toggle = document.createElement("button");
+  toggle.className = "btn btn--ghost";
+  toggle.textContent = isDismissed ? "Restore" : "Dismiss";
+  toggle.addEventListener("click", () => {
+    if (isDismissed) state.dismissedWarningIds.delete(w.id);
+    else             state.dismissedWarningIds.add(w.id);
+    persistDismissedWarnings();
+    renderWarnings();
+  });
+  actions.appendChild(toggle);
+  el.appendChild(actions);
+
+  return el;
+}
+
+function navigateToRow(target) {
+  if (!target) return;
+  openWarnings(false);
+  if (target.team && target.team !== state.currentTeam) {
+    state.currentTeam = target.team;
+    state.currentCategory = null;
+    localStorage.setItem("depthchart_team", state.currentTeam);
+    document.getElementById("team-select").value = state.currentTeam;
+    document.getElementById("add-row-team").textContent = state.currentTeam;
+    document.getElementById("add-custom-team").textContent = state.currentTeam;
+  }
+
+  // Find the row, switch its category if needed, then highlight.
+  const row = state.rows.find(r => Number(r._sheet_row) === Number(target.sheet_row));
+  if (row && row.depthPositionCategory) {
+    state.currentCategory = row.depthPositionCategory;
+  }
+  renderTeamView();
+
+  // After render, find and flash the row.
+  setTimeout(() => {
+    const trs = document.querySelectorAll(".tbl tbody tr");
+    for (const tr of trs) {
+      // Match by depthOrder + displayName cells (rough but works).
+      if (tr.dataset.sheetRow == String(target.sheet_row)) {
+        tr.scrollIntoView({ behavior: "smooth", block: "center" });
+        tr.classList.add("row--warning-highlight");
+        setTimeout(() => tr.classList.remove("row--warning-highlight"), 3500);
+        break;
+      }
+    }
+  }, 80);
+}
+
+function openWarnings(open) {
+  const panel = document.getElementById("warnings-panel");
+  const scrim = document.getElementById("warnings-scrim");
+  if (!panel || !scrim) return;
+  panel.classList.toggle("is-open", !!open);
+  scrim.classList.toggle("is-open", !!open);
+  panel.setAttribute("aria-hidden", open ? "false" : "true");
+  scrim.setAttribute("aria-hidden", open ? "false" : "true");
+  if (open) renderWarnings();
+}
+
+function persistDismissedWarnings() {
+  try {
+    localStorage.setItem(LS_DISMISSED, JSON.stringify([...state.dismissedWarningIds]));
+  } catch (err) {
+    console.warn("dismiss persistence failed", err);
+  }
+}
+function restoreDismissedWarnings() {
+  try {
+    const raw = localStorage.getItem(LS_DISMISSED);
+    if (!raw) return;
+    state.dismissedWarningIds = new Set(JSON.parse(raw) || []);
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------

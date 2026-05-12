@@ -19,9 +19,33 @@
       <span id="snapshot-age" class="badge badge--muted" title="When this snapshot was generated"></span>
       <span id="edit-count" class="badge badge--accent" title="In-memory edits in this browser">0 edits</span>
       <span id="auth-status" class="badge badge--muted">auth: dev</span>
+      <button id="warnings-toggle" class="btn btn--ghost warnings-toggle" style="display:none;" title="External-source warnings">
+        <span class="warnings-toggle__icon" aria-hidden="true">⚠</span>
+        <span id="warnings-count">0</span>
+      </button>
       <button id="signout-btn" class="btn btn--ghost" style="display:none;">Sign out</button>
     </div>
   </header>
+
+  <!-- Warnings side drawer -->
+  <aside id="warnings-panel" class="warnings-panel" aria-hidden="true">
+    <div class="warnings-panel__head">
+      <h2>External-source warnings</h2>
+      <button id="warnings-close" class="btn btn--ghost" aria-label="Close">×</button>
+    </div>
+    <div class="warnings-panel__sub">
+      Flags from NFL.com transactions and (when available) OurLads depth charts.
+      Nothing here changes your depth chart automatically — fix or dismiss.
+    </div>
+    <div class="warnings-panel__filters" id="warnings-filters">
+      <button class="chip chip--active" data-filter="all">All</button>
+      <button class="chip" data-filter="transactions">Transactions</button>
+      <button class="chip" data-filter="ourlads">OurLads</button>
+      <button class="chip" data-filter="dismissed">Dismissed</button>
+    </div>
+    <div class="warnings-panel__list" id="warnings-list"></div>
+  </aside>
+  <div id="warnings-scrim" class="warnings-scrim" aria-hidden="true"></div>
 
   <!-- Auth gate: shown only if auth.config.json present + not yet signed in -->
   <div id="auth-gate" class="auth-gate" style="display:none;">
@@ -85,6 +109,43 @@
         </div>
         <div class="add-row__field add-row__field--button">
           <button id="add-player-btn" class="btn btn--primary">Add (in-memory)</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="add-row add-row--custom">
+      <h3>Add a custom player to <span id="add-custom-team">—</span></h3>
+      <p class="add-row__hint">For players not yet in the <strong>Rosters</strong> tab. Uses a <code>ROOKIE###</code> placeholder ID that can be reconciled with the NFL feed later.</p>
+      <div class="add-row__grid add-row__grid--custom">
+        <div class="add-row__field">
+          <label>Player Name</label>
+          <input type="text" id="add-custom-name" placeholder="e.g., Jane Doe" autocomplete="off" />
+        </div>
+        <div class="add-row__field">
+          <label>Position</label>
+          <select id="add-custom-position"></select>
+        </div>
+        <div class="add-row__field">
+          <label>Category</label>
+          <select id="add-custom-category">
+            <option value="OFF">Offense</option>
+            <option value="DEF">Defense</option>
+            <option value="ST">Special Teams</option>
+            <option value="IR">Injured Reserve</option>
+            <option value="SUS">Suspended</option>
+            <option value="PS">Practice Squad</option>
+          </select>
+        </div>
+        <div class="add-row__field">
+          <label>Jersey (optional)</label>
+          <input type="text" id="add-custom-jersey" placeholder="—" autocomplete="off" />
+        </div>
+        <div class="add-row__field">
+          <label>Placeholder ID</label>
+          <input type="text" id="add-custom-id" placeholder="ROOKIE###" autocomplete="off" />
+        </div>
+        <div class="add-row__field add-row__field--button">
+          <button id="add-custom-btn" class="btn btn--primary">Add custom (in-memory)</button>
         </div>
       </div>
     </section>
