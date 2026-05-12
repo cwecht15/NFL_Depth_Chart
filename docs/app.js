@@ -68,9 +68,6 @@ const state = {
 
 (async function boot() {
   try {
-    // 0. Load runtime config (snapshot_url, etc.) if present.
-    state.runtimeConfig = (await tryFetchJSON("./runtime.config.json")) || {};
-
     // 1. Load optional auth config; if present and non-empty, require sign-in.
     state.authConfig = await tryFetchJSON("./auth.config.json");
     if (state.authConfig && state.authConfig.client_id) {
@@ -122,13 +119,9 @@ async function launchApp() {
 // ---------------------------------------------------------------------------
 
 async function fetchSnapshot() {
-  // Prefer the runtime-configured URL (typically the R2 public bucket).
-  // Falls back to a same-origin file at ./data/snapshot.json (dev mode).
-  const configured = state.runtimeConfig && state.runtimeConfig.snapshot_url;
-  const base = configured && configured.trim() ? configured.trim() : "./data/snapshot.json";
-  const url = base + (base.includes("?") ? "&" : "?") + "cb=" + Date.now();
-  const r = await fetch(url, { cache: "no-store", mode: "cors" });
-  if (!r.ok) throw new Error(`Failed to fetch snapshot from ${base} (${r.status})`);
+  const url = "./data/snapshot.json?cb=" + Date.now();
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`Failed to fetch snapshot (${r.status})`);
   return r.json();
 }
 

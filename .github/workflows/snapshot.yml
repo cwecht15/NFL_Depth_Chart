@@ -1,15 +1,13 @@
 name: Pull DepthChart Snapshot
 
-# Reads the live Google Sheet via the `fp-data` service account and uploads
-# the resulting snapshot.json to a Cloudflare R2 bucket. The frontend on
-# Cloudflare Pages fetches it from R2 directly — no commit needed, so this
-# can run as often as you want without piling up commits on the repo.
+# Reads the live Google Sheet via the `fp-data` service account and commits
+# the resulting docs/data/snapshot.json so GitHub Pages serves it.
+#
+# GitHub Pages has a soft limit of ~10 builds/hour. The 10-minute cron leaves
+# headroom (6/hour) for the occasional manual dispatch.
 
 on:
   schedule:
-    # Every 10 minutes. R2 has no per-month write cap on the free tier
-    # (1M class-A operations is plenty), so this can be cranked down as
-    # low as 5 minutes if needed.
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
   push:
@@ -19,7 +17,7 @@ on:
       - ".github/workflows/snapshot.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: snapshot
@@ -42,12 +40,19 @@ jobs:
       - name: Install deps
         run: pip install -r tools/requirements.txt
 
-      - name: Pull snapshot and upload to R2
+      - name: Pull snapshot
         env:
           FP_DATA_KEY_JSON: ${{ secrets.FP_DATA_KEY_JSON }}
-          R2_ACCOUNT_ID:    ${{ secrets.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET:        ${{ secrets.R2_BUCKET }}
-          R2_OBJECT_KEY:    snapshot.json
         run: python tools/pull_snapshot.py
+
+      - name: Commit if changed
+        run: |
+          git config user.name "snapshot-bot"
+          git config user.email "snapshot-bot@users.noreply.github.com"
+          git add docs/data/snapshot.json
+          if git diff --staged --quiet; then
+            echo "No changes; skipping commit."
+          else
+            git commit -m "snapshot: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push
+          fi

@@ -1,8 +1,0 @@
-{
-  "_doc": [
-    "Copy this file to docs/runtime.config.json and set snapshot_url to your",
-    "R2 bucket's public snapshot.json URL. Without runtime.config.json the",
-    "app falls back to ./data/snapshot.json (handy for local dev)."
-  ],
-  "snapshot_url": "https://pub-XXXXXXXXXXXXXXXX.r2.dev/snapshot.json"
-}
