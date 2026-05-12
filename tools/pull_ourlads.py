@@ -116,38 +116,77 @@ def _parse_team(html: str, team: str) -> list[dict]:
         depth_position = (cells[0].get_text(strip=True) or "").upper()
         if not depth_position or depth_position in {"POS", "POSITION"}:
             continue
-        for idx, cell in enumerate(cells[1:], start=1):
+        order_in_row = 0  # only increments on real player cells, not blanks
+        for cell in cells[1:]:
             text = cell.get_text(" ", strip=True)
             if not text:
                 continue
-            # Player cells look like: "Last F. 18 R" or "Last F." with extra glyphs.
-            # Strip trailing parens/letters/numbers conservatively.
             name = _clean_player(text)
             if not name:
                 continue
+            order_in_row += 1
             out.append({
                 "name": name,
                 "position": DEPTH_TO_POSITION.get(depth_position, ""),
                 "depth_position": depth_position,
-                "depth_order": idx,
+                "depth_order": order_in_row,
             })
     return out
 
 
-_PLAYER_TAIL = re.compile(r"\s*(?:#\d+|\d+|[A-Z]{1,3})\s*$")
+# Trailing notes OurLads stamps after a player name:
+#   "Smith J. 24/"   -> jersey + "/"
+#   "Smith J. 24 R"  -> jersey + status flag
+#   "Smith J. U/"    -> single-letter status (R/P/N/U/...)
+#   "Smith J. PUP"   -> 2-3 letter status code
+# All of these get stripped. We deliberately do NOT touch name suffixes like
+# "Jr.", "Sr.", "II", "III" since they contain dots or are 3+ chars without
+# matching the suffix pattern.
+def _is_trailing_note(token: str) -> bool:
+    """True if a trailing whitespace-separated token looks like an OurLads
+    jersey/status annotation rather than part of the player's name.
+
+    Treated as notes:
+      - Pure digits (e.g., "24")
+      - Anything containing a slash (e.g., "24/", "U/", "P/")
+      - A single uppercase letter (e.g., "R", "P")
+
+    Deliberately NOT treated as notes:
+      - 2-3 letter sequences without a slash (so "II", "III", "Jr", "PUP")
+        — false positives on rare status codes are accepted to keep name
+        suffixes intact.
+    """
+    if not token:
+        return False
+    if token.isdigit():
+        return True
+    if "/" in token:
+        return True
+    if len(token) == 1 and token.isupper() and token.isalpha():
+        return True
+    return False
+
+
 def _clean_player(text: str) -> str:
-    """Trim trailing jersey/status glyphs OurLads appends to names."""
-    s = text.strip()
-    # Compress whitespace.
-    s = re.sub(r"\s+", " ", s)
-    # Many OurLads cells look like "Smith T. 18 R" → strip trailing tokens
-    # that look like jersey numbers / status letters.
-    while True:
-        m = _PLAYER_TAIL.search(s)
-        if not m:
-            break
-        s = s[:m.start()].rstrip()
-    return s
+    """Clean up an OurLads player cell into 'First Last (suffix)'.
+
+    OurLads renders names as 'Last, First' with trailing jersey/status notes.
+    We strip the notes and flip the comma so the result matches the sheet's
+    `displayName` convention used in DepthCharts.
+    """
+    s = re.sub(r"\s+", " ", text.strip())
+    tokens = s.split(" ")
+    while tokens and _is_trailing_note(tokens[-1]):
+        tokens.pop()
+    s = " ".join(tokens)
+    # Flip "Last, First" → "First Last".
+    if "," in s:
+        last, _, first = s.partition(",")
+        last = last.strip().rstrip(",")
+        first = first.strip()
+        if first and last:
+            s = f"{first} {last}"
+    return s.strip()
 
 
 def main() -> int:
