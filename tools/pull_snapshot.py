@@ -217,14 +217,48 @@ def main() -> int:
         "options": options,
     }
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(
-        json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
-    size_kb = OUTPUT_PATH.stat().st_size / 1024
+    # Always write locally — useful for dev and as a backup artifact in the
+    # GitHub Action run logs.
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH.write_bytes(payload)
+    size_kb = len(payload) / 1024
     print(f"Wrote {OUTPUT_PATH} ({size_kb:.1f} KB)", flush=True)
+
+    # If R2 credentials are present, upload there too. Frontend reads from R2;
+    # the committed snapshot.json file (if any) is only a fallback.
+    r2_account = os.environ.get("R2_ACCOUNT_ID")
+    r2_key     = os.environ.get("R2_ACCESS_KEY_ID")
+    r2_secret  = os.environ.get("R2_SECRET_ACCESS_KEY")
+    r2_bucket  = os.environ.get("R2_BUCKET")
+    r2_object  = os.environ.get("R2_OBJECT_KEY", "snapshot.json")
+    if r2_account and r2_key and r2_secret and r2_bucket:
+        try:
+            import boto3
+        except ImportError:
+            sys.exit("R2 upload requested but boto3 is not installed. "
+                     "Run: pip install -r tools/requirements.txt")
+
+        endpoint = f"https://{r2_account}.r2.cloudflarestorage.com"
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=r2_key,
+            aws_secret_access_key=r2_secret,
+            region_name="auto",
+        )
+        s3.put_object(
+            Bucket=r2_bucket,
+            Key=r2_object,
+            Body=payload,
+            ContentType="application/json",
+            CacheControl="public, max-age=60",
+        )
+        print(f"Uploaded to R2 bucket {r2_bucket}/{r2_object} ({size_kb:.1f} KB)", flush=True)
+    else:
+        print("R2_* env vars not all set; skipped R2 upload (local-only).", flush=True)
+
     return 0
 
 

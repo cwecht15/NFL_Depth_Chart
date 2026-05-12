@@ -1,16 +1,16 @@
 name: Pull DepthChart Snapshot
 
-# Runs on a schedule + manual dispatch. Pulls the live Google Sheet via the
-# `fp-data` service account (key stored as the FP_DATA_KEY_JSON secret) and
-# commits the resulting docs/data/snapshot.json so GitHub Pages serves it.
+# Reads the live Google Sheet via the `fp-data` service account and uploads
+# the resulting snapshot.json to a Cloudflare R2 bucket. The frontend on
+# Cloudflare Pages fetches it from R2 directly — no commit needed, so this
+# can run as often as you want without piling up commits on the repo.
 
 on:
   schedule:
-    # Hourly (top of the hour). Cloudflare Pages free tier is 500 builds/mo;
-    # 24/day = ~720/mo, which usually fits under that with Cloudflare's build
-    # de-dup. Drop to "0 */2" (every 2h, ~360/mo) for more headroom, or use
-    # workflow_dispatch only.
-    - cron: "0 * * * *"
+    # Every 10 minutes. R2 has no per-month write cap on the free tier
+    # (1M class-A operations is plenty), so this can be cranked down as
+    # low as 5 minutes if needed.
+    - cron: "*/10 * * * *"
   workflow_dispatch: {}
   push:
     branches: [main]
@@ -19,7 +19,7 @@ on:
       - ".github/workflows/snapshot.yml"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: snapshot
@@ -42,19 +42,12 @@ jobs:
       - name: Install deps
         run: pip install -r tools/requirements.txt
 
-      - name: Pull snapshot
+      - name: Pull snapshot and upload to R2
         env:
           FP_DATA_KEY_JSON: ${{ secrets.FP_DATA_KEY_JSON }}
+          R2_ACCOUNT_ID:    ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET:        ${{ secrets.R2_BUCKET }}
+          R2_OBJECT_KEY:    snapshot.json
         run: python tools/pull_snapshot.py
-
-      - name: Commit if changed
-        run: |
-          git config user.name "snapshot-bot"
-          git config user.email "snapshot-bot@users.noreply.github.com"
-          git add docs/data/snapshot.json
-          if git diff --staged --quiet; then
-            echo "No changes; skipping commit."
-          else
-            git commit -m "snapshot: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            git push
-          fi

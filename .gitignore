@@ -1,7 +1,11 @@
 # Never commit a real auth config or service-account key.
 docs/auth.config.json
+docs/runtime.config.json
 *.key.json
 fp-data-*.json
+
+# Snapshot lives in R2, not the repo. The local copy is dev-only.
+docs/data/snapshot.json
 
 # Python tooling
 __pycache__/
