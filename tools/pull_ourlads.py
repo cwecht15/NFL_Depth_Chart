@@ -56,10 +56,10 @@ OURLADS_TO_SHEET = {
 
 # OurLads URL takes a slugged team key (e.g., "ARI" for Arizona, "LAR" for Rams)
 TEAM_URL_SLUGS = {
-    "ARZ": "ARI", "ATL": "ATL", "BLT": "BAL", "BUF": "BUF",
+    "ARZ": "ARZ", "ATL": "ATL", "BLT": "BAL", "BUF": "BUF",
     "CAR": "CAR", "CHI": "CHI", "CIN": "CIN", "CLV": "CLE",
     "DAL": "DAL", "DEN": "DEN", "DET": "DET", "GB":  "GB",
-    "HST": "HOU", "IND": "IND", "JAX": "JAC", "KC":  "KC",
+    "HST": "HOU", "IND": "IND", "JAX": "JAX", "KC":  "KC",
     "LAC": "LAC", "LA":  "LAR", "LV":  "LV",  "MIA": "MIA",
     "MIN": "MIN", "NE":  "NE",  "NO":  "NO",  "NYG": "NYG",
     "NYJ": "NYJ", "PHI": "PHI", "PIT": "PIT", "SEA": "SEA",
