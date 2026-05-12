@@ -296,6 +296,11 @@ function renderPositionCard(pos, rows) {
   head.innerHTML = `<h3>${escapeHTML(pos)}</h3><span class="pos-card__meta">${rows.length} player${rows.length === 1 ? "" : "s"}</span>`;
   card.appendChild(head);
 
+  // Scroll wrapper so the table can extend wider than the card and the
+  // user can swipe / scroll horizontally through all columns.
+  const wrap = document.createElement("div");
+  wrap.className = "tbl-wrap";
+
   const tbl = document.createElement("table");
   tbl.className = "tbl";
 
@@ -315,7 +320,8 @@ function renderPositionCard(pos, rows) {
     tbody.appendChild(renderRow(r));
   }
   tbl.appendChild(tbody);
-  card.appendChild(tbl);
+  wrap.appendChild(tbl);
+  card.appendChild(wrap);
   return card;
 }
 

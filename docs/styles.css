@@ -264,6 +264,26 @@ select { min-width: 100px; }
 
 /* --- table --------------------------------------------------------------- */
 
+/* Each table is wider than its card; this wrapper lets you scroll within. */
+.tbl-wrap {
+  overflow-x: auto;
+  overflow-y: visible;
+  /* Visible scrollbar styling for dark theme */
+  scrollbar-color: var(--accent) var(--bg-tertiary);
+  scrollbar-width: thin;
+}
+.tbl-wrap::-webkit-scrollbar { height: 10px; }
+.tbl-wrap::-webkit-scrollbar-track {
+  background: var(--bg-tertiary);
+}
+.tbl-wrap::-webkit-scrollbar-thumb {
+  background: var(--border-primary);
+  border-radius: 5px;
+}
+.tbl-wrap::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
 .tbl {
   width: 100%;
   border-collapse: collapse;
