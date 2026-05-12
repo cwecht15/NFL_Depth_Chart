@@ -1,0 +1,15 @@
+# Never commit a real auth config or service-account key.
+docs/auth.config.json
+*.key.json
+fp-data-*.json
+
+# Python tooling
+__pycache__/
+*.pyc
+.venv/
+
+# Editor noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

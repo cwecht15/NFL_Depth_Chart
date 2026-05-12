@@ -1,0 +1,11 @@
+{
+  "_doc": [
+    "Copy this file to docs/auth.config.json and fill in your Google OAuth Client ID and the editor allowlist.",
+    "If docs/auth.config.json is absent at runtime, the app loads with no auth gate (dev mode)."
+  ],
+  "client_id": "YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+  "allowlist": [
+    "alice@example.com",
+    "bob@example.com"
+  ]
+}

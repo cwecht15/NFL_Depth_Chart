@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Depth Chart Editor</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%231a1a2e'/%3E%3Ctext x='50' y='62' font-size='52' text-anchor='middle' fill='%23e94560' font-family='monospace'%3EDC%3C/text%3E%3C/svg%3E" />
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="topbar__left">
+      <h1>Depth Chart Editor</h1>
+      <span class="badge badge--readonly" title="No writes are made to the Google Sheet.">read-only sheet</span>
+    </div>
+    <div class="topbar__right">
+      <span id="snapshot-age" class="badge badge--muted" title="When this snapshot was generated"></span>
+      <span id="edit-count" class="badge badge--accent" title="In-memory edits in this browser">0 edits</span>
+      <span id="auth-status" class="badge badge--muted">auth: dev</span>
+      <button id="signout-btn" class="btn btn--ghost" style="display:none;">Sign out</button>
+    </div>
+  </header>
+
+  <!-- Auth gate: shown only if auth.config.json present + not yet signed in -->
+  <div id="auth-gate" class="auth-gate" style="display:none;">
+    <div class="auth-gate__card">
+      <h2>Sign in to continue</h2>
+      <p class="muted">Only allowlisted editors can access this site.</p>
+      <div id="google-signin"></div>
+      <p id="auth-error" class="auth-error"></p>
+    </div>
+  </div>
+
+  <main id="app" class="app">
+    <div class="loader" id="initial-loader">
+      <div class="spinner"></div>
+      <p>Loading snapshot&hellip;</p>
+    </div>
+  </main>
+
+  <!-- Template: app shell rendered once snapshot is loaded -->
+  <template id="tpl-app-shell">
+    <div class="controls">
+      <div class="control">
+        <label for="team-select">Team</label>
+        <select id="team-select"></select>
+      </div>
+      <div class="control control--actions">
+        <button id="refresh-btn" class="btn btn--ghost" title="Re-fetch the snapshot file from the server">Refresh snapshot</button>
+        <button id="reset-btn" class="btn btn--danger-ghost" title="Discard all in-memory edits">Discard edits</button>
+        <button id="export-csv-btn" class="btn btn--primary">Export edited CSV</button>
+        <button id="export-json-btn" class="btn btn--ghost">Export diff JSON</button>
+      </div>
+    </div>
+
+    <nav class="tabs" id="category-tabs"></nav>
+
+    <section class="content" id="category-content"></section>
+
+    <section class="add-row">
+      <h3>Add a player to <span id="add-row-team">—</span></h3>
+      <div class="add-row__grid">
+        <div class="add-row__field">
+          <label>Player (search Rosters)</label>
+          <input type="text" id="add-player-search" list="roster-suggestions" placeholder="Type a name…" autocomplete="off" />
+          <datalist id="roster-suggestions"></datalist>
+        </div>
+        <div class="add-row__field">
+          <label>Depth Position</label>
+          <select id="add-depth-position"></select>
+        </div>
+        <div class="add-row__field">
+          <label>Category</label>
+          <select id="add-category">
+            <option value="OFF">Offense</option>
+            <option value="DEF">Defense</option>
+            <option value="ST">Special Teams</option>
+            <option value="IR">Injured Reserve</option>
+            <option value="SUS">Suspended</option>
+            <option value="PS">Practice Squad</option>
+          </select>
+        </div>
+        <div class="add-row__field add-row__field--button">
+          <button id="add-player-btn" class="btn btn--primary">Add (in-memory)</button>
+        </div>
+      </div>
+    </section>
+  </template>
+
+  <footer class="footer">
+    <span>Depth Chart Editor &middot; static snapshot via GitHub Actions &middot; nothing here writes back to the Google Sheet.</span>
+  </footer>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
