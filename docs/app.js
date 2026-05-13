@@ -1519,13 +1519,37 @@ function _renderSyncSummary(r) {
   head.innerHTML = `<strong>${r.updates_count}</strong> rows with updates &middot; <strong>${r.appends_count}</strong> new rows to append.`;
   wrap.appendChild(head);
 
+  // Lookup by sheet row so we can surface the affected player on each change.
+  const rowsByRow = new Map();
+  for (const row of state.rows) {
+    rowsByRow.set(Number(row._sheet_row), row);
+  }
+
   if (r.sample_updates && r.sample_updates.length) {
     const h = document.createElement("h3"); h.textContent = "Sample updates";
     wrap.appendChild(h);
     const ul = document.createElement("ul"); ul.className = "sync-list";
     for (const u of r.sample_updates) {
+      const row = rowsByRow.get(Number(u.row)) || {};
+      const name    = row.displayName || "(unknown player)";
+      const elias   = row.eliasId   || "—";
+      const gsis    = row.gsisId    || "—";
+      const team    = row.team      || "—";
       const li = document.createElement("li");
-      li.innerHTML = `row <code>${u.row}</code> &middot; <strong>${escapeHTML(u.key)}</strong>: <code>${escapeHTML(u.before || "")}</code> → <code>${escapeHTML(u.after || "")}</code>`;
+      li.className = "sync-list__row";
+      li.innerHTML = `
+        <div class="sync-list__player">
+          <strong>${escapeHTML(name)}</strong>
+          <span class="sync-list__tag">${escapeHTML(team)}</span>
+          <span class="sync-list__id">elias <code>${escapeHTML(elias)}</code></span>
+          <span class="sync-list__id">gsis <code>${escapeHTML(gsis)}</code></span>
+        </div>
+        <div class="sync-list__change">
+          row <code>${u.row}</code> &middot;
+          <strong>${escapeHTML(u.key)}</strong>:
+          <code>${escapeHTML(u.before || "")}</code> → <code>${escapeHTML(u.after || "")}</code>
+        </div>
+      `;
       ul.appendChild(li);
     }
     wrap.appendChild(ul);
@@ -1536,7 +1560,25 @@ function _renderSyncSummary(r) {
     const ul = document.createElement("ul"); ul.className = "sync-list";
     for (const a of r.sample_appends) {
       const li = document.createElement("li");
-      li.innerHTML = `+ <strong>${escapeHTML(a.displayName)}</strong> / ${escapeHTML(a.team)} / ${escapeHTML(a.depthPosition)} &middot; elias=<code>${escapeHTML(a.eliasId)}</code>`;
+      li.className = "sync-list__row";
+      // Find the matching in-memory row to recover gsisId (sample_appends from
+      // the script only carries a subset of fields).
+      const match = state.rows.find(rr =>
+        (rr.displayName === a.displayName) &&
+        (rr.team === a.team) &&
+        (rr.depthPosition === a.depthPosition)
+      ) || {};
+      li.innerHTML = `
+        <div class="sync-list__player">
+          + <strong>${escapeHTML(a.displayName)}</strong>
+          <span class="sync-list__tag">${escapeHTML(a.team)}</span>
+          <span class="sync-list__tag">${escapeHTML(a.depthPosition)}</span>
+        </div>
+        <div class="sync-list__change">
+          elias <code>${escapeHTML(a.eliasId || match.eliasId || "")}</code>
+          &middot; gsis <code>${escapeHTML(match.gsisId || "")}</code>
+        </div>
+      `;
       ul.appendChild(li);
     }
     wrap.appendChild(ul);

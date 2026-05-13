@@ -645,7 +645,7 @@ select { min-width: 100px; }
   line-height: 1.6;
 }
 .sync-list li {
-  padding: 4px 0;
+  padding: 8px 0;
   border-bottom: 1px dashed var(--border-soft);
 }
 .sync-list code {
@@ -654,6 +654,42 @@ select { min-width: 100px; }
   border-radius: 3px;
   font-family: var(--font-mono);
   font-size: 0.78rem;
+}
+
+.sync-list__row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.sync-list__player {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.9rem;
+  color: var(--text-heading);
+}
+.sync-list__player strong { color: var(--text-heading); }
+.sync-list__tag {
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.65rem;
+  padding: 1px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 700;
+}
+.sync-list__id {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.sync-list__change {
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  padding-left: 4px;
 }
 
 .sync-error { color: var(--danger); font-size: 0.92rem; }
