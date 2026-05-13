@@ -49,12 +49,17 @@ KEEP_ROWS = 3000 # cap on emitted per-player events
 
 POSITION = r"(?:QB|RB|FB|HB|WR|TE|OT|T|OG|G|OL|C|DE|DT|NT|DL|LB|OLB|ILB|MLB|EDGE|CB|S|SS|FS|DB|NB|P|K|LS|H)s?"
 
-# A "real" name token: starts with capital, has at least one lowercase, can
-# contain apostrophes / hyphens / periods. Or an initial like "A." / "A.J."
-NAME_PART = r"[A-Z][a-z][a-zA-Z'.\-]*"
+# A "real" name token: starts with capital, then either a lowercase letter
+# (DeMarcus, Decambra) or an apostrophe (O'Brien, Ka'ena, Tre'Vaughn). The
+# apostrophe class includes both ASCII (') and the typographic U+2018/U+2019
+# variants that ESPN's feed actually uses. Without the typographic chars,
+# names like "Ka’ena Decambra" get split into "Ka" + "Decambra".
+NAME_PART = r"[A-Z](?:[a-z]|['‘’])[a-zA-Z'‘’.\-]*"
 INITIAL   = r"[A-Z]\.(?:[A-Z]\.)?"
 NAME_TOKEN = rf"(?:{NAME_PART}|{INITIAL})"
-NAME = rf"{NAME_TOKEN}(?:\s+{NAME_TOKEN})*(?:\s+(?:Jr\.?|Sr\.?|II|III|IV|V))?"
+# Suffix alternation ordered longest-first within each numeral family so
+# "III" doesn't get clipped to "II" by leftmost-match (same for IV vs V).
+NAME = rf"{NAME_TOKEN}(?:\s+{NAME_TOKEN})*(?:\s+(?:Jr\.?|Sr\.?|III|II|IV|V))?"
 
 # Verb → canonical transactionType (matches the existing frontend warning logic).
 VERB_RULES = [
@@ -92,12 +97,29 @@ def _classify(sent: str):
     return None
 
 
+# Trailing-initial detector for the sentence splitter. Matches a chunk that
+# ends with " P", " P.J", " A.J.B", etc. — a bare capital, optionally followed
+# by `.X` pairs — sitting at the end of the chunk after a word boundary.
+# Roman numeral suffixes (II/III/IV/V) don't match because they're preceded
+# by another uppercase letter, not a word boundary (e.g. "...Andrews IV").
+_TRAILING_INITIAL = re.compile(r"(?:^|\s)[A-Z](?:\.[A-Z])*$")
+
+
 def _split_sentences(desc: str) -> list[str]:
-    # Split on period followed by space + capital (or end-of-string). This
-    # keeps "Jr." and abbreviations like "A.J." intact since they're followed
-    # by a lowercase or another period, not a Capital+space.
+    # First pass: naïve split on period followed by whitespace + capital or
+    # end-of-string. This will incorrectly slice initials like "P.J. Smith"
+    # into "...DL P.J" + " Smith ..." — repaired below.
     parts = re.split(r"\.(?=\s+[A-Z]|$)", desc)
-    return [p.strip().rstrip(".") for p in parts if p and p.strip()]
+    # Repair pass: if the previous chunk ends with what looks like the front
+    # half of an initial (bare capital, "P.J", "A.J.B"), the original period
+    # was inside a name, not a sentence boundary — rejoin.
+    fixed: list[str] = []
+    for p in parts:
+        if fixed and _TRAILING_INITIAL.search(fixed[-1].rstrip()):
+            fixed[-1] = fixed[-1].rstrip() + "." + p
+        else:
+            fixed.append(p)
+    return [p.strip().rstrip(".") for p in fixed if p and p.strip()]
 
 
 def _extract_players(sent: str) -> list[str]:
