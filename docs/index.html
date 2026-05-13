@@ -53,6 +53,19 @@
         </div>
         <p id="settings-status" class="settings-status"></p>
       </section>
+
+      <section class="settings-section">
+        <h3>CLI fallback</h3>
+        <p class="muted">
+          Download a <code>sync_export.json</code> for use with
+          <code>tools/sync_to_sheet.py</code> when the Apps Script path
+          isn't available. Normal day-to-day editing uses
+          <strong>Sync&nbsp;to&nbsp;sheet</strong> above.
+        </p>
+        <div class="settings-buttons">
+          <button id="settings-export-sync" class="btn btn--ghost">Download sync JSON</button>
+        </div>
+      </section>
     </div>
   </aside>
   <div id="settings-scrim" class="warnings-scrim" aria-hidden="true"></div>
@@ -123,9 +136,6 @@
       <div class="control control--actions">
         <button id="refresh-btn" class="btn btn--ghost" title="Re-fetch the snapshot file from the server">Refresh snapshot</button>
         <button id="reset-btn" class="btn btn--danger-ghost" title="Discard all in-memory edits">Discard edits</button>
-        <button id="export-csv-btn" class="btn btn--ghost">Export edited CSV</button>
-        <button id="export-json-btn" class="btn btn--ghost">Export diff JSON</button>
-        <button id="export-sync-btn" class="btn btn--ghost" title="Download the JSON consumed by tools/sync_to_sheet.py">Download sync JSON</button>
         <button id="sync-to-sheet-btn" class="btn btn--primary" title="Send edits to the configured Apps Script web app">Sync to sheet</button>
       </div>
     </div>

@@ -221,9 +221,6 @@ function renderShell() {
     toast("Edits discarded.");
   });
 
-  document.getElementById("export-csv-btn").addEventListener("click", exportEditedCSV);
-  document.getElementById("export-json-btn").addEventListener("click", exportDiffJSON);
-  document.getElementById("export-sync-btn").addEventListener("click", exportSyncJSON);
   document.getElementById("sync-to-sheet-btn").addEventListener("click", onSyncToSheet);
   document.getElementById("settings-toggle").addEventListener("click", () => openSettings(true));
   document.getElementById("settings-close").addEventListener("click", () => openSettings(false));
@@ -231,6 +228,7 @@ function renderShell() {
   document.getElementById("settings-save").addEventListener("click", onSaveSettings);
   document.getElementById("settings-clear").addEventListener("click", onClearSettings);
   document.getElementById("settings-test").addEventListener("click", onTestSync);
+  document.getElementById("settings-export-sync").addEventListener("click", exportSyncJSON);
   document.getElementById("sync-modal-close").addEventListener("click", closeSyncModal);
   document.getElementById("add-player-btn").addEventListener("click", onAddPlayer);
   document.getElementById("add-custom-btn").addEventListener("click", onAddCustomPlayer);
@@ -782,30 +780,6 @@ function onAddCustomPlayer() {
 // Export
 // ---------------------------------------------------------------------------
 
-function exportEditedCSV() {
-  const keys = state.snapshot.depth.keys.slice();
-  const labelMap = state.snapshot.depth.key_to_label || {};
-  const header = ["_sheet_row", ...keys];
-  const rows = state.rows.slice().sort((a, b) => Number(a._sheet_row) - Number(b._sheet_row));
-  const csv = [
-    header.join(","),
-    ...rows.map(r => header.map(k => csvCell(r[k])).join(",")),
-  ].join("\n");
-  download("depthcharts-edited.csv", csv, "text/csv");
-}
-
-function exportDiffJSON() {
-  const payload = {
-    generated_at: new Date().toISOString(),
-    snapshot_at: state.snapshot.generated_at,
-    editor: state.authedEmail || "anon",
-    edits: state.edits,
-    edited_row_count: state.editedRowKeys.size,
-    edit_count: state.edits.length,
-  };
-  download("depthcharts-diff.json", JSON.stringify(payload, null, 2), "application/json");
-}
-
 function exportSyncJSON() {
   // Format consumed by tools/sync_to_sheet.py — every row in current state
   // plus the keys/labels list so the script can map JSON keys to columns.
@@ -834,15 +808,6 @@ function exportSyncJSON() {
   };
   download("sync_export.json", JSON.stringify(payload), "application/json");
   toast("sync_export.json downloaded. Run: python tools/sync_to_sheet.py sync_export.json", 8000);
-}
-
-function csvCell(v) {
-  if (v === null || v === undefined) return "";
-  const s = String(v);
-  if (s.includes(",") || s.includes("\"") || s.includes("\n")) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
 }
 
 function download(name, data, mime) {
@@ -1519,10 +1484,23 @@ async function refreshSnapshot() {
   const syncUrl = getSyncUrl();
   if (syncUrl) {
     try {
-      toast("Refreshing from sheet…", 3000);
+      // Sticky toast — stays visible until the request returns and we
+      // replace it with a success/error message. Apps Script can take
+      // 5-10 s, longer than any reasonable auto-hide.
+      toast("Refreshing from sheet…", Infinity);
       const fresh = await _postToSync({ action: "snapshot", source_tab: "DepthCharts" });
       if (!fresh || !fresh.ok) {
         throw new Error((fresh && fresh.error) || "snapshot endpoint returned not-ok");
+      }
+      // A stale Apps Script deployment (predating handleSnapshot) will ignore
+      // action="snapshot" and respond with a sync-summary that has no `depth`.
+      // Catch that here so we don't blow up dereferencing it below.
+      if (!fresh.depth || !Array.isArray(fresh.depth.rows)) {
+        throw new Error(
+          "Live snapshot endpoint not available — your Apps Script deployment " +
+          "is older than sync.gs's handleSnapshot. Redeploy sync.gs " +
+          "(Deploy → Manage deployments → Edit → New version)."
+        );
       }
       // Merge: keep cached rosters/options/transactions, replace depth.
       state.snapshot = Object.assign({}, state.snapshot, {
@@ -1840,7 +1818,10 @@ function toast(msg, durationMs) {
     );
   }
   // Floating bottom toast for messages that need to be readable.
-  if (typeof durationMs === "number" && durationMs > 0) {
+  // durationMs === Infinity → sticky (stay until replaced or hideToast()).
+  // durationMs > 0          → auto-hide after that many ms.
+  // omitted / 0             → no floating toast at all.
+  if (typeof durationMs === "number" && (durationMs > 0 || durationMs === Infinity)) {
     let tost = document.getElementById("floating-toast");
     if (!tost) {
       tost = document.createElement("div");
@@ -1851,8 +1832,16 @@ function toast(msg, durationMs) {
     tost.textContent = msg;
     tost.classList.add("is-visible");
     clearTimeout(toast._timer);
-    toast._timer = setTimeout(() => tost.classList.remove("is-visible"), durationMs);
+    if (Number.isFinite(durationMs)) {
+      toast._timer = setTimeout(() => tost.classList.remove("is-visible"), durationMs);
+    }
   }
+}
+
+function hideToast() {
+  const tost = document.getElementById("floating-toast");
+  if (tost) tost.classList.remove("is-visible");
+  clearTimeout(toast._timer);
 }
 
 function showFatalError(msg) {
