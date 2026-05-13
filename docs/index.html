@@ -73,11 +73,18 @@
   <aside id="warnings-panel" class="warnings-panel" aria-hidden="true">
     <div class="warnings-panel__head">
       <h2>External-source warnings</h2>
-      <button id="warnings-close" class="btn btn--ghost" aria-label="Close">×</button>
+      <div class="warnings-panel__head-actions">
+        <button id="warnings-refresh" class="btn btn--ghost" title="Re-fetch transactions and OurLads, then recompute warnings">Refresh sources</button>
+        <button id="warnings-close" class="btn btn--ghost" aria-label="Close">×</button>
+      </div>
     </div>
     <div class="warnings-panel__sub">
-      Flags from NFL.com transactions and (when available) OurLads depth charts.
+      Flags from NFL transactions and (when available) OurLads depth charts.
       Nothing here changes your depth chart automatically — fix or dismiss.
+    </div>
+    <div class="warnings-panel__sources" id="warnings-sources">
+      <span class="muted" id="warnings-src-tx">Transactions: …</span>
+      <span class="muted" id="warnings-src-ourlads">OurLads: …</span>
     </div>
     <div class="warnings-panel__filters" id="warnings-filters">
       <button class="chip chip--active" data-filter="all">All</button>

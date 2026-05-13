@@ -751,12 +751,26 @@ select { min-width: 100px; }
   font-size: 1.05rem;
   color: var(--text-heading);
 }
+.warnings-panel__head-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
 .warnings-panel__sub {
   padding: 10px 18px 6px;
   color: var(--text-muted);
   font-size: 0.78rem;
+}
+.warnings-panel__sources {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 18px 10px;
+  font-size: 0.72rem;
   border-bottom: 1px solid var(--border-soft);
 }
+.warnings-panel__sources .stale { color: var(--warn); }
+.warnings-panel__sources .fresh { color: var(--good, #8ee08e); }
 .warnings-panel__filters {
   display: flex;
   gap: 6px;

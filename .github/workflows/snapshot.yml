@@ -45,11 +45,15 @@ jobs:
           FP_DATA_KEY_JSON: ${{ secrets.FP_DATA_KEY_JSON }}
         run: python tools/pull_snapshot.py
 
+      - name: Pull transactions (ESPN public API, no auth)
+        run: python tools/pull_transactions.py
+        continue-on-error: true
+
       - name: Commit if changed
         run: |
           git config user.name "snapshot-bot"
           git config user.email "snapshot-bot@users.noreply.github.com"
-          git add docs/data/snapshot.json
+          git add docs/data/snapshot.json docs/data/transactions.json
           if git diff --staged --quiet; then
             echo "No changes; skipping commit."
             exit 0

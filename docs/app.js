@@ -55,7 +55,11 @@ const LS_TARGET_TAB = "depthchart_target_tab_v1";
 const DEFAULT_TARGET_TAB = "Copy of DepthCharts";
 
 // How recent a transaction must be (in days) to surface as a warning.
-const TRANSACTION_WARN_DAYS = 60;
+// ESPN's feed is typically current to the prior day, so 365 lets us cover the
+// offseason without losing recent moves. The Transactions_New fallback can be
+// months stale, so the cutoff doubles as a "don't dump the entire 2024 season"
+// guard for that path.
+const TRANSACTION_WARN_DAYS = 365;
 
 // ---------------------------------------------------------------------------
 // State
@@ -75,6 +79,7 @@ const state = {
   dismissedWarningIds: new Set(),
   warningFilter: "all",
   ourlads: null,
+  transactions: null,    // docs/data/transactions.json (preferred over snapshot.transactions)
 };
 
 // ---------------------------------------------------------------------------
@@ -108,6 +113,10 @@ async function launchApp() {
 
   // Optional: load OurLads snapshot if the workflow has committed one.
   state.ourlads = await tryFetchJSON("./data/ourlads.json");
+
+  // Prefer the fresh ESPN-sourced transactions file when present; the
+  // Transactions_New tab is often months behind.
+  state.transactions = await tryFetchJSON("./data/transactions.json");
 
   // Replay locally-stored edits, if any.
   restoreEditsFromLocalStorage();
@@ -249,6 +258,7 @@ function renderShell() {
   document.getElementById("warnings-toggle").addEventListener("click", () => openWarnings(true));
   document.getElementById("warnings-close").addEventListener("click", () => openWarnings(false));
   document.getElementById("warnings-scrim").addEventListener("click", () => openWarnings(false));
+  document.getElementById("warnings-refresh").addEventListener("click", refreshExternalSources);
   document.getElementById("warnings-filters").addEventListener("click", (e) => {
     const btn = e.target.closest("button.chip");
     if (!btn) return;
@@ -906,7 +916,11 @@ function _rowsByGsisId() {
 // --- Transaction warnings --------------------------------------------------
 
 function computeTransactionWarnings() {
-  const tx = state.snapshot.transactions;
+  // Prefer the standalone transactions.json (ESPN public API, fresh).
+  // Fall back to whatever the snapshot loaded from Transactions_New.
+  const tx = (state.transactions && state.transactions.rows)
+    ? state.transactions
+    : state.snapshot.transactions;
   if (!tx || !tx.rows || !tx.headers) return [];
   const headers = tx.headers;
   const byName = _rowsByName();
@@ -1119,6 +1133,77 @@ function rebuildWarnings() {
     ...computeOurladsWarnings(),
   ];
   renderWarnings();
+  renderSourceFreshness();
+}
+
+function renderSourceFreshness() {
+  const txEl = document.getElementById("warnings-src-tx");
+  const olEl = document.getElementById("warnings-src-ourlads");
+  if (txEl) {
+    const tx = state.transactions || state.snapshot?.transactions;
+    if (!tx || !tx.rows || !tx.rows.length) {
+      txEl.textContent = "Transactions: no data loaded.";
+      txEl.className = "stale";
+    } else {
+      const generated = (state.transactions && state.transactions.generated_at) || state.snapshot?.generated_at;
+      const newest = _newestTxDate(tx);
+      const newestDays = newest ? _daysAgo(newest) : null;
+      const genDays = generated ? Math.floor((Date.now() - new Date(generated).getTime()) / 86400000) : null;
+      const source = state.transactions ? (state.transactions.source || "espn") : "sheet";
+      const fresh = newestDays !== null && newestDays <= 7;
+      const stale = newestDays !== null && newestDays > 30;
+      txEl.textContent =
+        `Transactions: ${tx.rows.length} rows from ${source}, newest ${newest || "?"}` +
+        (newestDays !== null ? ` (${newestDays}d ago)` : "") +
+        (genDays !== null && genDays > 0 ? `, file ${genDays}d old` : "");
+      txEl.className = fresh ? "fresh" : (stale ? "stale" : "muted");
+    }
+  }
+  if (olEl) {
+    if (!state.ourlads || !state.ourlads.rows) {
+      olEl.textContent = "OurLads: no snapshot loaded.";
+      olEl.className = "muted";
+    } else {
+      const generated = state.ourlads.generated_at;
+      const days = generated ? Math.floor((Date.now() - new Date(generated).getTime()) / 86400000) : null;
+      olEl.textContent =
+        `OurLads: ${state.ourlads.rows.length} rows` +
+        (generated ? `, generated ${days}d ago` : "");
+      olEl.className = days !== null && days > 7 ? "stale" : "muted";
+    }
+  }
+}
+
+function _newestTxDate(tx) {
+  const idx = tx.headers.indexOf("date");
+  if (idx < 0) return null;
+  let max = "";
+  for (const r of tx.rows) {
+    const d = r[idx];
+    if (d && d > max) max = d;
+  }
+  return max || null;
+}
+
+async function refreshExternalSources() {
+  const btn = document.getElementById("warnings-refresh");
+  if (btn) { btn.disabled = true; btn.textContent = "Refreshing…"; }
+  try {
+    const [fresh_tx, fresh_ol] = await Promise.all([
+      tryFetchJSON("./data/transactions.json?cb=" + Date.now()),
+      tryFetchJSON("./data/ourlads.json?cb=" + Date.now()),
+    ]);
+    let n = 0;
+    if (fresh_tx) { state.transactions = fresh_tx; n++; }
+    if (fresh_ol) { state.ourlads = fresh_ol; n++; }
+    rebuildWarnings();
+    const active = state.warnings.filter(w => !state.dismissedWarningIds.has(w.id)).length;
+    toast(`Sources refreshed (${n}/2). ${active} active warning${active === 1 ? "" : "s"}.`, 3500);
+  } catch (err) {
+    toast("Refresh failed: " + (err.message || err), 6000);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Refresh sources"; }
+  }
 }
 
 function renderWarnings() {
