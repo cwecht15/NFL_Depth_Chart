@@ -5,7 +5,12 @@ Action reads the live `2026 Depth Chart` Google Sheet via the `fp-data`
 service account and commits `docs/data/snapshot.json` to this repo;
 GitHub Pages serves the static frontend from `docs/`. Edits happen
 entirely in the browser (`localStorage`) and can be exported as CSV/JSON.
-**Nothing here writes back to the Google Sheet.**
+**Nothing here writes back to the Google Sheet** unless you explicitly
+sync through the Apps Script web app.
+
+> For a system-wide overview — how this Pages site relates to the local
+> Streamlit app, the shared data model, the write-back paths, and where
+> credentials live — see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ```
 pages-site/
