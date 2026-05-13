@@ -158,14 +158,22 @@ async function tryFetchJSON(url) {
   }
 }
 
-function setSnapshotAgeBadge(iso) {
+function setSnapshotAgeBadge(iso, source) {
   if (!iso) return;
   const t = new Date(iso);
   const mins = Math.round((Date.now() - t.getTime()) / 60000);
-  const text = mins < 60
-    ? `snapshot: ${mins}m ago`
-    : `snapshot: ${Math.round(mins / 60)}h ago`;
-  const cls = mins > 60 ? "warn" : "muted";
+  const isLive = source === "apps-script-live";
+  let text;
+  if (isLive && mins < 2) {
+    text = "live (just now)";
+  } else if (isLive) {
+    text = `live (${mins}m ago)`;
+  } else if (mins < 60) {
+    text = `snapshot: ${mins}m ago`;
+  } else {
+    text = `snapshot: ${Math.round(mins / 60)}h ago`;
+  }
+  const cls = isLive ? "good" : (mins > 60 ? "warn" : "muted");
   setBadge("snapshot-age", text, cls);
 }
 
@@ -190,15 +198,7 @@ function renderShell() {
 
   document.getElementById("refresh-btn").addEventListener("click", async () => {
     if (state.editedRowKeys.size > 0 && !confirm("Refreshing will keep your in-memory edits. Continue?")) return;
-    const snap = await fetchSnapshot();
-    state.snapshot = snap;
-    // Rebuild baseline; apply edits on top.
-    state.rows = snap.depth.rows.map(r => ({ ...r }));
-    state.baseline = new Map(snap.depth.rows.map(r => [r._sheet_row, { ...r }]));
-    applyEditsToRows();
-    setSnapshotAgeBadge(snap.generated_at);
-    renderTeamView();
-    toast("Snapshot reloaded.");
+    await refreshSnapshot();
   });
 
   document.getElementById("reset-btn").addEventListener("click", () => {
@@ -1424,6 +1424,49 @@ async function _postToSync(payload) {
   const text = await r.text();
   try { return JSON.parse(text); }
   catch { throw new Error("Server replied with non-JSON: " + text.slice(0, 240)); }
+}
+
+async function refreshSnapshot() {
+  // Prefer the live Apps Script endpoint when a URL is configured; that
+  // reads DepthCharts directly so edits made in the sheet show up
+  // immediately. Falls back to fetching docs/data/snapshot.json (which is
+  // only refreshed every ~10 min by the GH Action cron).
+  const syncUrl = getSyncUrl();
+  if (syncUrl) {
+    try {
+      toast("Refreshing from sheet…", 3000);
+      const fresh = await _postToSync({ action: "snapshot", source_tab: "DepthCharts" });
+      if (!fresh || !fresh.ok) {
+        throw new Error((fresh && fresh.error) || "snapshot endpoint returned not-ok");
+      }
+      // Merge: keep cached rosters/options/transactions, replace depth.
+      state.snapshot = Object.assign({}, state.snapshot, {
+        depth: fresh.depth,
+        generated_at: fresh.generated_at,
+        source: fresh.source,
+      });
+      state.rows = fresh.depth.rows.map(r => ({ ...r }));
+      state.baseline = new Map(fresh.depth.rows.map(r => [r._sheet_row, { ...r }]));
+      applyEditsToRows();
+      setSnapshotAgeBadge(fresh.generated_at, fresh.source);
+      renderTeamView();
+      rebuildWarnings();
+      toast(`Live refresh: ${fresh.depth.rows.length} rows from ${fresh.source_tab}.`, 3000);
+      return;
+    } catch (err) {
+      console.warn("Live refresh failed, falling back to static snapshot:", err);
+      toast("Live refresh failed; using cached snapshot. " + (err.message || err), 6000);
+    }
+  }
+  // Static fallback.
+  const snap = await fetchSnapshot();
+  state.snapshot = snap;
+  state.rows = snap.depth.rows.map(r => ({ ...r }));
+  state.baseline = new Map(snap.depth.rows.map(r => [r._sheet_row, { ...r }]));
+  applyEditsToRows();
+  setSnapshotAgeBadge(snap.generated_at);
+  renderTeamView();
+  rebuildWarnings();
 }
 
 async function onSyncToSheet() {

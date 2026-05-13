@@ -69,7 +69,13 @@ function doPost(e) {
       }
     }
 
-    const result = handleSync(payload);
+    const action = (payload.action || "sync").toLowerCase();
+    let result;
+    if (action === "snapshot") {
+      result = handleSnapshot(payload);
+    } else {
+      result = handleSync(payload);
+    }
     return _json(result);
   } catch (err) {
     return _json({ ok: false, error: String(err && err.message || err) }, 500);
@@ -293,6 +299,82 @@ function _toCellString(v) {
   if (v === true)  return "TRUE";
   if (v === false) return "FALSE";
   return String(v);
+}
+
+// === Live snapshot ========================================================
+//
+// Returns a fresh-from-the-sheet view of the DepthCharts tab in the same
+// shape the static snapshot.json uses for its "depth" section. The frontend
+// merges this into its in-memory state when the user clicks Refresh.
+// Rosters / Options / Transactions are left to the GitHub Action cron;
+// they change less often and would slow this endpoint significantly.
+
+function handleSnapshot(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const tab = (payload && payload.source_tab) || "DepthCharts";
+  const sheet = ss.getSheetByName(tab);
+  if (!sheet) throw new Error("Source tab not found: " + tab);
+
+  const lastCol = sheet.getLastColumn();
+  const lastRow = sheet.getLastRow();
+
+  // Row 3 = human-readable label; row 4 = cell notes (JSON keys).
+  const labelRow = sheet.getRange(3, 1, 1, lastCol).getDisplayValues()[0];
+  const headerRow = sheet.getRange(HEADER_NOTE_ROW, 1, 1, lastCol);
+  const notes = headerRow.getNotes()[0];
+
+  const keys = [];
+  const keyToCol = {};
+  const keyToLabel = {};
+  for (let i = 0; i < lastCol; i++) {
+    const note = (notes[i] || "").trim();
+    if (!note) continue;
+    if (!(note in keyToCol)) keys.push(note);
+    keyToCol[note] = i; // 0-based; later columns overwrite if duplicate
+    const label = (labelRow[i] || "").trim();
+    if (label) keyToLabel[note] = label;
+  }
+  // Eliminate duplicates from `keys` while preserving order (the rightmost
+  // column wins via keyToCol[]).
+  const seen = new Set();
+  const dedupKeys = [];
+  for (const k of keys) {
+    if (seen.has(k)) continue;
+    seen.add(k);
+    dedupKeys.push(k);
+  }
+
+  const eliasIdx = keyToCol["eliasId"];
+  const numDataRows = Math.max(0, lastRow - (DATA_START_ROW - 1));
+  const rows = [];
+  if (numDataRows > 0) {
+    const data = sheet.getRange(DATA_START_ROW, 1, numDataRows, lastCol).getDisplayValues();
+    for (let r = 0; r < data.length; r++) {
+      const rowVals = data[r];
+      // Required-column filter: skip rows whose eliasId is blank (matches
+      // pull_snapshot.py and the publish path's requiredCol semantics).
+      if (eliasIdx === undefined || !rowVals[eliasIdx]) continue;
+      const rec = { _sheet_row: DATA_START_ROW + r };
+      for (const key of dedupKeys) {
+        const c = keyToCol[key];
+        rec[key] = rowVals[c] || "";
+      }
+      rows.push(rec);
+    }
+  }
+
+  return {
+    ok: true,
+    generated_at: new Date().toISOString(),
+    spreadsheet_id: SPREADSHEET_ID,
+    source: "apps-script-live",
+    source_tab: tab,
+    depth: {
+      keys: dedupKeys,
+      key_to_label: keyToLabel,
+      rows: rows,
+    },
+  };
 }
 
 function _json(obj, status) {
