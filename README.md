@@ -103,6 +103,48 @@ cd docs && python -m http.server 8000
 # -> http://localhost:8000
 ```
 
+## Writing edits back to the sheet (`Copy of DepthCharts`)
+
+The web app can't hold the service-account key, so write-back is a two-step
+flow:
+
+1. In the web app, click **"Sync export"** in the toolbar. This downloads
+   `sync_export.json` — every row in your current edited state, including
+   any custom players you added.
+
+2. Locally, run the writer script:
+
+   ```bash
+   # Dry-run (default) — reads the target tab and shows what WOULD change.
+   python tools/sync_to_sheet.py sync_export.json
+
+   # Actually write to "Copy of DepthCharts":
+   python tools/sync_to_sheet.py sync_export.json --commit
+   ```
+
+   The default target is **`Copy of DepthCharts`**. The script refuses to
+   touch the live `DepthCharts` tab unless you pass `--allow-prod` *and*
+   `--commit`.
+
+   Other useful flags:
+   ```bash
+   --tab "My Test Tab"   # different target tab
+   --preview-rows 25     # show more sample diffs in dry-run output
+   --key path/to/key.json
+   ```
+
+**Safety rails baked in:**
+
+- The script only writes to **manual** columns (eliasId, gsisId, jersey,
+  team, status, depthPosition, etc.). Formula columns are detected by
+  inspecting row 4 of the target tab and skipped, so the spill formulas
+  keep working.
+- Cells whose desired value already matches the sheet are skipped — no
+  redundant writes.
+- New rows (custom players added in the web app) are appended below the
+  last existing data row.
+- Dry-run is the default; `--commit` is required to make any changes.
+
 ---
 
 ## What it does

@@ -210,6 +210,7 @@ function renderShell() {
 
   document.getElementById("export-csv-btn").addEventListener("click", exportEditedCSV);
   document.getElementById("export-json-btn").addEventListener("click", exportDiffJSON);
+  document.getElementById("export-sync-btn").addEventListener("click", exportSyncJSON);
   document.getElementById("add-player-btn").addEventListener("click", onAddPlayer);
   document.getElementById("add-custom-btn").addEventListener("click", onAddCustomPlayer);
   document.getElementById("signout-btn").addEventListener("click", signOut);
@@ -781,6 +782,36 @@ function exportDiffJSON() {
     edit_count: state.edits.length,
   };
   download("depthcharts-diff.json", JSON.stringify(payload, null, 2), "application/json");
+}
+
+function exportSyncJSON() {
+  // Format consumed by tools/sync_to_sheet.py — every row in current state
+  // plus the keys/labels list so the script can map JSON keys to columns.
+  const keys = state.snapshot.depth.keys.slice();
+  const labelMap = state.snapshot.depth.key_to_label || {};
+  // Strip the in-memory bookkeeping fields (anything that starts with "_")
+  // EXCEPT _sheet_row which the script needs as the row identifier.
+  const rows = state.rows.map(r => {
+    const out = {};
+    for (const k of Object.keys(r)) {
+      if (k === "_sheet_row" || !k.startsWith("_")) out[k] = r[k];
+    }
+    return out;
+  });
+  // Sort by sheet_row for stable diffs.
+  rows.sort((a, b) => Number(a._sheet_row) - Number(b._sheet_row));
+
+  const payload = {
+    exported_at: new Date().toISOString(),
+    snapshot_at: state.snapshot.generated_at,
+    editor: state.authedEmail || "anon",
+    keys, labels: labelMap,
+    edit_count: state.edits.length,
+    edited_row_count: state.editedRowKeys.size,
+    rows,
+  };
+  download("sync_export.json", JSON.stringify(payload), "application/json");
+  toast("sync_export.json downloaded. Run: python tools/sync_to_sheet.py sync_export.json", 8000);
 }
 
 function csvCell(v) {
@@ -1362,15 +1393,29 @@ function isPlaceholder(eid) {
   return String(eid).toUpperCase().startsWith("ROOKIE");
 }
 
-function toast(msg) {
-  // Lightweight: log + brief edit-count flash.
+function toast(msg, durationMs) {
   console.log("[toast]", msg);
   const el = document.getElementById("edit-count");
-  if (!el) return;
-  el.animate(
-    [{ transform: "scale(1)" }, { transform: "scale(1.15)" }, { transform: "scale(1)" }],
-    { duration: 280 }
-  );
+  if (el) {
+    el.animate(
+      [{ transform: "scale(1)" }, { transform: "scale(1.15)" }, { transform: "scale(1)" }],
+      { duration: 280 }
+    );
+  }
+  // Floating bottom toast for messages that need to be readable.
+  if (typeof durationMs === "number" && durationMs > 0) {
+    let tost = document.getElementById("floating-toast");
+    if (!tost) {
+      tost = document.createElement("div");
+      tost.id = "floating-toast";
+      tost.className = "floating-toast";
+      document.body.appendChild(tost);
+    }
+    tost.textContent = msg;
+    tost.classList.add("is-visible");
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(() => tost.classList.remove("is-visible"), durationMs);
+  }
 }
 
 function showFatalError(msg) {
