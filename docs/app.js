@@ -49,6 +49,10 @@ const DISPLAY_COLUMNS = [
 
 const LS_KEY = "depthchart_edits_v1";
 const LS_DISMISSED = "depthchart_dismissed_warnings_v1";
+const LS_SYNC_URL = "depthchart_sync_url_v1";
+const LS_TARGET_TAB = "depthchart_target_tab_v1";
+
+const DEFAULT_TARGET_TAB = "Copy of DepthCharts";
 
 // How recent a transaction must be (in days) to surface as a warning.
 const TRANSACTION_WARN_DAYS = 60;
@@ -211,6 +215,14 @@ function renderShell() {
   document.getElementById("export-csv-btn").addEventListener("click", exportEditedCSV);
   document.getElementById("export-json-btn").addEventListener("click", exportDiffJSON);
   document.getElementById("export-sync-btn").addEventListener("click", exportSyncJSON);
+  document.getElementById("sync-to-sheet-btn").addEventListener("click", onSyncToSheet);
+  document.getElementById("settings-toggle").addEventListener("click", () => openSettings(true));
+  document.getElementById("settings-close").addEventListener("click", () => openSettings(false));
+  document.getElementById("settings-scrim").addEventListener("click", () => openSettings(false));
+  document.getElementById("settings-save").addEventListener("click", onSaveSettings);
+  document.getElementById("settings-clear").addEventListener("click", onClearSettings);
+  document.getElementById("settings-test").addEventListener("click", onTestSync);
+  document.getElementById("sync-modal-close").addEventListener("click", closeSyncModal);
   document.getElementById("add-player-btn").addEventListener("click", onAddPlayer);
   document.getElementById("add-custom-btn").addEventListener("click", onAddCustomPlayer);
   document.getElementById("signout-btn").addEventListener("click", signOut);
@@ -1287,6 +1299,261 @@ function restoreDismissedWarnings() {
     if (!raw) return;
     state.dismissedWarningIds = new Set(JSON.parse(raw) || []);
   } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// Settings (Apps Script sync URL + target tab)
+// ---------------------------------------------------------------------------
+
+function getSyncUrl() {
+  return (localStorage.getItem(LS_SYNC_URL) || "").trim();
+}
+function getTargetTab() {
+  return (localStorage.getItem(LS_TARGET_TAB) || "").trim() || DEFAULT_TARGET_TAB;
+}
+
+function openSettings(open) {
+  const panel = document.getElementById("settings-panel");
+  const scrim = document.getElementById("settings-scrim");
+  if (!panel || !scrim) return;
+  if (open) {
+    document.getElementById("settings-sync-url").value = getSyncUrl();
+    document.getElementById("settings-target-tab").value = getTargetTab();
+    document.getElementById("settings-status").textContent = "";
+  }
+  panel.classList.toggle("is-open", !!open);
+  scrim.classList.toggle("is-open", !!open);
+  panel.setAttribute("aria-hidden", open ? "false" : "true");
+  scrim.setAttribute("aria-hidden", open ? "false" : "true");
+}
+
+function onSaveSettings() {
+  const url = document.getElementById("settings-sync-url").value.trim();
+  const tab = document.getElementById("settings-target-tab").value.trim() || DEFAULT_TARGET_TAB;
+  if (url && !/^https:\/\/script\.google\.com\/macros\/s\/.*\/exec$/.test(url)) {
+    setSettingsStatus("That doesn't look like an Apps Script /exec URL.", "error");
+    return;
+  }
+  if (url) localStorage.setItem(LS_SYNC_URL, url);
+  else     localStorage.removeItem(LS_SYNC_URL);
+  localStorage.setItem(LS_TARGET_TAB, tab);
+  setSettingsStatus("Saved.", "ok");
+}
+
+function onClearSettings() {
+  localStorage.removeItem(LS_SYNC_URL);
+  localStorage.removeItem(LS_TARGET_TAB);
+  document.getElementById("settings-sync-url").value = "";
+  document.getElementById("settings-target-tab").value = "";
+  setSettingsStatus("Cleared.", "ok");
+}
+
+async function onTestSync() {
+  const url = document.getElementById("settings-sync-url").value.trim();
+  if (!url) { setSettingsStatus("Enter a URL first.", "error"); return; }
+  setSettingsStatus("Testing…", "muted");
+  try {
+    // Health check — the Apps Script's doGet returns a small JSON body.
+    const r = await fetch(url, { method: "GET", redirect: "follow" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const text = await r.text();
+    let body;
+    try { body = JSON.parse(text); } catch { body = null; }
+    if (body && body.ok) {
+      setSettingsStatus(
+        `OK. Server time: ${body.time}. Default tab: ${body.default_target_tab}.`,
+        "ok"
+      );
+    } else {
+      setSettingsStatus("Reached the URL but didn't get the expected JSON.", "error");
+    }
+  } catch (err) {
+    setSettingsStatus("Failed: " + (err && err.message || err), "error");
+  }
+}
+
+function setSettingsStatus(msg, kind) {
+  const el = document.getElementById("settings-status");
+  if (!el) return;
+  el.textContent = msg;
+  el.className = "settings-status settings-status--" + (kind || "muted");
+}
+
+// ---------------------------------------------------------------------------
+// Sync to sheet (POSTs sync_export to the Apps Script web app)
+// ---------------------------------------------------------------------------
+
+function _buildSyncPayload(extra) {
+  const keys = state.snapshot.depth.keys.slice();
+  const labelMap = state.snapshot.depth.key_to_label || {};
+  const rows = state.rows.map((r) => {
+    const out = {};
+    for (const k of Object.keys(r)) {
+      if (k === "_sheet_row" || !k.startsWith("_")) out[k] = r[k];
+    }
+    return out;
+  });
+  rows.sort((a, b) => Number(a._sheet_row) - Number(b._sheet_row));
+  return Object.assign({
+    exported_at: new Date().toISOString(),
+    snapshot_at: state.snapshot.generated_at,
+    editor: state.authedEmail || "anon",
+    keys, labels: labelMap,
+    edit_count: state.edits.length,
+    edited_row_count: state.editedRowKeys.size,
+    rows,
+    target_tab: getTargetTab(),
+  }, extra || {});
+}
+
+async function _postToSync(payload) {
+  const url = getSyncUrl();
+  if (!url) throw new Error("No Apps Script URL configured. Open Settings (⚙) and paste it.");
+  // text/plain is a "simple" request — no CORS preflight. The Apps Script
+  // reads e.postData.contents either way.
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify(payload),
+    redirect: "follow",
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    throw new Error(`HTTP ${r.status}: ${text.slice(0, 240)}`);
+  }
+  const text = await r.text();
+  try { return JSON.parse(text); }
+  catch { throw new Error("Server replied with non-JSON: " + text.slice(0, 240)); }
+}
+
+async function onSyncToSheet() {
+  if (!getSyncUrl()) {
+    openSettings(true);
+    setSettingsStatus("Paste your Apps Script URL first, then try Sync again.", "error");
+    return;
+  }
+  showSyncModal({ phase: "loading", message: "Computing dry-run preview…" });
+  try {
+    const preview = await _postToSync(_buildSyncPayload({ commit: false }));
+    if (!preview.ok) {
+      showSyncModal({
+        phase: "error",
+        message: "Server refused: " + (preview.error || "unknown"),
+      });
+      return;
+    }
+    showSyncModal({ phase: "preview", result: preview });
+  } catch (err) {
+    showSyncModal({ phase: "error", message: String(err.message || err) });
+  }
+}
+
+async function _syncCommit() {
+  showSyncModal({ phase: "loading", message: "Writing to sheet…" });
+  try {
+    const result = await _postToSync(_buildSyncPayload({ commit: true }));
+    if (!result.ok) {
+      showSyncModal({
+        phase: "error",
+        message: "Server refused: " + (result.error || "unknown"),
+      });
+      return;
+    }
+    showSyncModal({ phase: "done", result });
+  } catch (err) {
+    showSyncModal({ phase: "error", message: String(err.message || err) });
+  }
+}
+
+function showSyncModal({ phase, message, result }) {
+  const scrim = document.getElementById("sync-modal-scrim");
+  const title = document.getElementById("sync-modal-title");
+  const body  = document.getElementById("sync-modal-body");
+  const foot  = document.getElementById("sync-modal-foot");
+  scrim.style.display = "flex";
+  body.innerHTML = "";
+  foot.innerHTML = "";
+
+  if (phase === "loading") {
+    title.textContent = "Working…";
+    body.innerHTML = `<div class="loader"><div class="spinner"></div><p>${escapeHTML(message || "")}</p></div>`;
+    return;
+  }
+  if (phase === "error") {
+    title.textContent = "Sync failed";
+    body.innerHTML = `<p class="sync-error">${escapeHTML(message || "Unknown error.")}</p>`;
+    foot.appendChild(_modalButton("Close", "btn--ghost", closeSyncModal));
+    return;
+  }
+  if (phase === "preview") {
+    const r = result;
+    title.textContent = `Preview: ${r.target_tab}`;
+    body.appendChild(_renderSyncSummary(r));
+    const apply = _modalButton(`Apply ${r.updates_count} updates + ${r.appends_count} new rows`, "btn--primary", _syncCommit);
+    if (r.updates_count + r.appends_count === 0) apply.disabled = true;
+    foot.appendChild(apply);
+    foot.appendChild(_modalButton("Cancel", "btn--ghost", closeSyncModal));
+    return;
+  }
+  if (phase === "done") {
+    const r = result;
+    title.textContent = `Synced to ${r.target_tab}`;
+    const summary = document.createElement("p");
+    summary.innerHTML = `Wrote <strong>${r.cells_written ?? 0}</strong> cells; appended <strong>${r.appended_rows ?? 0}</strong> new rows`
+      + (r.appended_at_row ? ` starting at row ${r.appended_at_row}` : "")
+      + (typeof r.elapsed_ms === "number" ? ` in ${r.elapsed_ms} ms` : "")
+      + ".";
+    body.appendChild(summary);
+    foot.appendChild(_modalButton("Done", "btn--primary", closeSyncModal));
+    return;
+  }
+}
+
+function closeSyncModal() {
+  document.getElementById("sync-modal-scrim").style.display = "none";
+}
+
+function _renderSyncSummary(r) {
+  const wrap = document.createElement("div");
+  const head = document.createElement("p");
+  head.innerHTML = `<strong>${r.updates_count}</strong> rows with updates &middot; <strong>${r.appends_count}</strong> new rows to append.`;
+  wrap.appendChild(head);
+
+  if (r.sample_updates && r.sample_updates.length) {
+    const h = document.createElement("h3"); h.textContent = "Sample updates";
+    wrap.appendChild(h);
+    const ul = document.createElement("ul"); ul.className = "sync-list";
+    for (const u of r.sample_updates) {
+      const li = document.createElement("li");
+      li.innerHTML = `row <code>${u.row}</code> &middot; <strong>${escapeHTML(u.key)}</strong>: <code>${escapeHTML(u.before || "")}</code> → <code>${escapeHTML(u.after || "")}</code>`;
+      ul.appendChild(li);
+    }
+    wrap.appendChild(ul);
+  }
+  if (r.sample_appends && r.sample_appends.length) {
+    const h = document.createElement("h3"); h.textContent = "Sample new rows";
+    wrap.appendChild(h);
+    const ul = document.createElement("ul"); ul.className = "sync-list";
+    for (const a of r.sample_appends) {
+      const li = document.createElement("li");
+      li.innerHTML = `+ <strong>${escapeHTML(a.displayName)}</strong> / ${escapeHTML(a.team)} / ${escapeHTML(a.depthPosition)} &middot; elias=<code>${escapeHTML(a.eliasId)}</code>`;
+      ul.appendChild(li);
+    }
+    wrap.appendChild(ul);
+  }
+  if (r.note) {
+    const p = document.createElement("p"); p.className = "muted"; p.textContent = r.note;
+    wrap.appendChild(p);
+  }
+  return wrap;
+}
+
+function _modalButton(label, klass, onClick) {
+  const b = document.createElement("button");
+  b.className = "btn " + (klass || "");
+  b.textContent = label;
+  b.addEventListener("click", onClick);
+  return b;
 }
 
 // ---------------------------------------------------------------------------

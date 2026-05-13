@@ -23,9 +23,51 @@
         <span class="warnings-toggle__icon" aria-hidden="true">⚠</span>
         <span id="warnings-count">0</span>
       </button>
+      <button id="settings-toggle" class="btn btn--ghost" title="Settings">⚙</button>
       <button id="signout-btn" class="btn btn--ghost" style="display:none;">Sign out</button>
     </div>
   </header>
+
+  <!-- Settings drawer -->
+  <aside id="settings-panel" class="settings-panel" aria-hidden="true">
+    <div class="settings-panel__head">
+      <h2>Settings</h2>
+      <button id="settings-close" class="btn btn--ghost" aria-label="Close">×</button>
+    </div>
+    <div class="settings-panel__body">
+      <section class="settings-section">
+        <h3>Sync to sheet (Apps Script)</h3>
+        <p class="muted">
+          Paste your DepthChart Sync web-app URL.
+          See <a href="https://github.com/cwecht15/NFL_Depth_Chart/blob/main/apps_script/README.md" target="_blank" rel="noopener">apps_script/README.md</a>
+          for setup steps. The URL lives only in your browser.
+        </p>
+        <label class="settings-label">Apps Script URL</label>
+        <input type="text" id="settings-sync-url" placeholder="https://script.google.com/macros/s/.../exec" />
+        <label class="settings-label">Target tab</label>
+        <input type="text" id="settings-target-tab" placeholder="Copy of DepthCharts" />
+        <div class="settings-buttons">
+          <button id="settings-save" class="btn btn--primary">Save</button>
+          <button id="settings-test" class="btn btn--ghost">Test connection</button>
+          <button id="settings-clear" class="btn btn--danger-ghost">Clear</button>
+        </div>
+        <p id="settings-status" class="settings-status"></p>
+      </section>
+    </div>
+  </aside>
+  <div id="settings-scrim" class="warnings-scrim" aria-hidden="true"></div>
+
+  <!-- Sync preview modal -->
+  <div id="sync-modal-scrim" class="modal-scrim" style="display:none;">
+    <div class="modal" id="sync-modal">
+      <div class="modal__head">
+        <h2 id="sync-modal-title">Sync preview</h2>
+        <button class="btn btn--ghost" id="sync-modal-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal__body" id="sync-modal-body"></div>
+      <div class="modal__foot" id="sync-modal-foot"></div>
+    </div>
+  </div>
 
   <!-- Warnings side drawer -->
   <aside id="warnings-panel" class="warnings-panel" aria-hidden="true">
@@ -76,7 +118,8 @@
         <button id="reset-btn" class="btn btn--danger-ghost" title="Discard all in-memory edits">Discard edits</button>
         <button id="export-csv-btn" class="btn btn--ghost">Export edited CSV</button>
         <button id="export-json-btn" class="btn btn--ghost">Export diff JSON</button>
-        <button id="export-sync-btn" class="btn btn--primary" title="Download the JSON the sync-to-sheet script consumes">Sync export</button>
+        <button id="export-sync-btn" class="btn btn--ghost" title="Download the JSON consumed by tools/sync_to_sheet.py">Download sync JSON</button>
+        <button id="sync-to-sheet-btn" class="btn btn--primary" title="Send edits to the configured Apps Script web app">Sync to sheet</button>
       </div>
     </div>
 
