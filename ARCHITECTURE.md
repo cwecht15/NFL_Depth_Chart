@@ -67,7 +67,8 @@ Depth_Chart/
     │       └── transactions.json
     ├── tools/
     │   ├── pull_snapshot.py    Sheet → docs/data/snapshot.json
-    │   ├── pull_transactions.py ESPN API → docs/data/transactions.json
+    │   ├── pull_transactions_nflcom.py NFL.com → docs/data/transactions.json
+    │   ├── pull_transactions.py ESPN API (legacy; kept for offline reference)
     │   ├── pull_ourlads.py     Scrape → docs/data/ourlads.json
     │   ├── sync_to_sheet.py    Local writer (CLI; dry-run by default)
     │   └── requirements.txt
@@ -282,13 +283,15 @@ larger dry-run.
 Beyond the workbook itself, the Pages site renders warnings from two
 external feeds:
 
-- **NFL transactions** — `pages-site/tools/pull_transactions.py` pulls
-  ESPN's public site API (no auth), classifies each sentence into a
-  canonical `transactionType` (`signings`, `waivers`, `released`,
-  `reserve-list`, `practice-squad`, `activations`, `trades`,
-  `suspensions`, `other`), extracts player names, and writes
-  `docs/data/transactions.json`. Preferred over the workbook's stale
-  `Transactions_New` tab.
+- **NFL transactions** — `pages-site/tools/pull_transactions_nflcom.py`
+  scrapes NFL.com's six per-category transaction pages
+  (`signings`/`waivers`/`terminations`/`trades`/`reserve-list`/`other`)
+  for the current and prior two months, emits one row per player per
+  transaction, and writes `docs/data/transactions.json`. Preferred over
+  the workbook's stale `Transactions_New` tab. The older
+  `pull_transactions.py` (ESPN public API) is kept in the tree as an
+  offline reference but is no longer wired to the workflow — ESPN's feed
+  bundles multi-player team-day sentences that produced noisy warnings.
 - **OurLads depth charts** — `pages-site/tools/pull_ourlads.py` scrapes
   `https://www.ourlads.com/nfldepthcharts/depthchart/<TEAM>` once a day,
   parses the visible table into one record per

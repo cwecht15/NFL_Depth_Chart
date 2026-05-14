@@ -55,11 +55,11 @@ const LS_TARGET_TAB = "depthchart_target_tab_v1";
 const DEFAULT_TARGET_TAB = "Copy of DepthCharts";
 
 // How recent a transaction must be (in days) to surface as a warning.
-// ESPN's feed is typically current to the prior day, so 365 lets us cover the
-// offseason without losing recent moves. The Transactions_New fallback can be
-// months stale, so the cutoff doubles as a "don't dump the entire 2024 season"
-// guard for that path.
-const TRANSACTION_WARN_DAYS = 365;
+// Warnings exist to flag moves the depth chart hasn't caught up to yet;
+// anything more than a couple weeks old is either already reconciled or
+// no longer actionable noise. The cutoff also guards against the
+// Transactions_New fallback dumping months of stale rows.
+const TRANSACTION_WARN_DAYS = 14;
 
 // ---------------------------------------------------------------------------
 // State

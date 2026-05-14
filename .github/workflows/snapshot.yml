@@ -45,8 +45,8 @@ jobs:
           FP_DATA_KEY_JSON: ${{ secrets.FP_DATA_KEY_JSON }}
         run: python tools/pull_snapshot.py
 
-      - name: Pull transactions (ESPN public API, no auth)
-        run: python tools/pull_transactions.py
+      - name: Pull transactions (NFL.com category pages)
+        run: python tools/pull_transactions_nflcom.py
         continue-on-error: true
 
       - name: Commit if changed
