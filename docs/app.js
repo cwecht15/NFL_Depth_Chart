@@ -583,12 +583,58 @@ function recordEdit(row, key, newValue) {
     ts: new Date().toISOString(),
     who: state.authedEmail || "anon",
   });
+
+  // Moving a player off FA: every FA row in the snapshot has
+  // depthPositionCategory="PS", so without a follow-up edit the player
+  // would land on the new team's Practice Squad tab. Offer to bump them
+  // up to the active-roster category that fits their position.
+  if (key === "team" && (before || "").toUpperCase() === FA_TEAM && (after || "").toUpperCase() !== FA_TEAM && after) {
+    maybePromptCategoryUpgrade(row);
+  }
+
   persistEdits();
   updateEditCount();
   // Cheap re-render of the current team view.
   renderTeamView();
   // Recompute warnings since edits may now resolve some.
   rebuildWarnings();
+}
+
+function maybePromptCategoryUpgrade(row) {
+  const currentCat = (row.depthPositionCategory || "").trim().toUpperCase();
+  if (currentCat && currentCat !== "PS") return;  // only auto-suggest for PS/blank
+  const suggested = suggestCategoryFromPosition(row.position || row.depthPosition);
+  if (!suggested || suggested === currentCat) return;
+  const fromLabel = CATEGORY_LABELS[currentCat] || currentCat || "Practice Squad";
+  const toLabel = CATEGORY_LABELS[suggested] || suggested;
+  const ok = confirm(
+    `Move "${row.displayName || "this player"}" from ${fromLabel} to ${toLabel}?\n\n` +
+    `OK   → set depthPositionCategory to ${suggested}\n` +
+    `Cancel → keep on Practice Squad`
+  );
+  if (!ok) return;
+  const beforeCat = row.depthPositionCategory ?? "";
+  row.depthPositionCategory = suggested;
+  state.edits.push({
+    sheet_row: row._sheet_row,
+    column: "depthPositionCategory",
+    before: beforeCat,
+    after: suggested,
+    ts: new Date().toISOString(),
+    who: state.authedEmail || "anon",
+  });
+}
+
+function suggestCategoryFromPosition(pos) {
+  const p = String(pos || "").trim().toUpperCase();
+  if (!p) return null;
+  // Offense — skill positions and offensive line.
+  if (["QB","RB","FB","HB","WR","LWR","SWR","RWR","TE","OL","OT","OG","C","LT","RT","LG","RG"].indexOf(p) >= 0) return "OFF";
+  // Defense — secondary, linebackers, and defensive line / edge.
+  if (["CB","S","FS","SS","DB","NB","LB","ILB","OLB","MLB","WLB","SLB","DL","DT","DE","NT","EDGE"].indexOf(p) >= 0) return "DEF";
+  // Special teams — kickers, punters, long-snappers, and returners.
+  if (["K","P","LS","KR","PR","ST"].indexOf(p) >= 0) return "ST";
+  return null;
 }
 
 // Lock-aware row gate. FA is intentionally unlocked: it's the league-wide
