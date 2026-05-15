@@ -128,10 +128,16 @@
 
   <!-- Template: app shell rendered once snapshot is loaded -->
   <template id="tpl-app-shell">
+    <div id="stale-snapshot-banner" class="stale-banner" style="display:none;"></div>
     <div class="controls">
       <div class="control">
         <label for="team-select">Team</label>
         <select id="team-select"></select>
+      </div>
+      <div class="control control--lock">
+        <button id="acquire-lock-btn" class="btn btn--primary" style="display:none;" title="Acquire the editing lock for the selected team">Lock team</button>
+        <button id="release-lock-btn" class="btn btn--ghost" style="display:none;" title="Release your editing lock so someone else can edit this team">Release lock</button>
+        <span id="lock-held-badge" class="badge badge--good" style="display:none;" title="Team you currently hold the editing lock for"></span>
       </div>
       <div class="control control--actions">
         <button id="refresh-btn" class="btn btn--ghost" title="Re-fetch the snapshot file from the server">Refresh snapshot</button>
@@ -139,6 +145,13 @@
         <button id="sync-to-sheet-btn" class="btn btn--primary" title="Send edits to the configured Apps Script web app">Sync to sheet</button>
       </div>
     </div>
+
+    <details class="locks-panel">
+      <summary>Currently editing&hellip;</summary>
+      <ul id="locks-list" class="locks-list">
+        <li class="muted">Loading lock state&hellip;</li>
+      </ul>
+    </details>
 
     <nav class="tabs" id="category-tabs"></nav>
 

@@ -47,12 +47,25 @@ const DISPLAY_COLUMNS = [
   "isTradeAcquisition",
 ];
 
-const LS_KEY = "depthchart_edits_v1";
-const LS_DISMISSED = "depthchart_dismissed_warnings_v1";
-const LS_SYNC_URL = "depthchart_sync_url_v1";
-const LS_TARGET_TAB = "depthchart_target_tab_v1";
+// LS bases. Keys that are per-user have their owner appended at runtime via
+// userScopedKey(); the Apps Script URL + target tab stay machine-scoped because
+// they're set once per deploy, not per editor.
+const LS_KEY_BASE        = "depthchart_edits_v1";
+const LS_DISMISSED_BASE  = "depthchart_dismissed_warnings_v1";
+const LS_SYNC_URL        = "depthchart_sync_url_v1";
+const LS_TARGET_TAB      = "depthchart_target_tab_v1";
+const LS_TEAM_BASE       = "depthchart_team";
 
 const DEFAULT_TARGET_TAB = "Copy of DepthCharts";
+
+// Stale-snapshot warning threshold (minutes). Snapshot.json is refreshed every
+// ~10 min by the GH Action; flag anything noticeably older than that.
+const SNAPSHOT_STALE_MIN = 20;
+
+// Lock control parameters mirror sync.gs.
+const LOCK_HEARTBEAT_MS = 2 * 60 * 1000;   // browser → Apps Script
+const LOCKS_POLL_MS     = 30 * 1000;       // dropdown refresh cadence
+const FA_TEAM           = "FA";
 
 // How recent a transaction must be (in days) to surface as a warning.
 // Warnings exist to flag moves the depth chart hasn't caught up to yet;
@@ -80,7 +93,24 @@ const state = {
   warningFilter: "all",
   ourlads: null,
   transactions: null,    // docs/data/transactions.json (preferred over snapshot.transactions)
+
+  // Multi-user lock state.
+  myLock: null,           // { team, owner_email, acquired_at, last_heartbeat_at }
+  allLocks: [],           // last polled list of all locks
+  locksFetchedAt: 0,      // ms timestamp
+  ttlSeconds: 0,          // server-reported lock TTL (filled by listLocks)
 };
+
+// Per-user localStorage key derivation. Until the user signs in, no per-user
+// state should be touched — boot guards this by gating everything behind the
+// auth callback.
+function userScopedKey(base) {
+  const tag = (state.authedEmail || "anon").toLowerCase();
+  return base + ":" + tag;
+}
+function lsKeyEdits()     { return userScopedKey(LS_KEY_BASE); }
+function lsKeyDismissed() { return userScopedKey(LS_DISMISSED_BASE); }
+function lsKeyTeam()      { return userScopedKey(LS_TEAM_BASE); }
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -88,15 +118,20 @@ const state = {
 
 (async function boot() {
   try {
-    // 1. Load optional auth config; if present and non-empty, require sign-in.
+    // Auth is mandatory in multi-user mode. auth.config.json must be present
+    // with a client_id; otherwise the editor refuses to start. This guarantees
+    // every edit is attributable.
     state.authConfig = await tryFetchJSON("./auth.config.json");
-    if (state.authConfig && state.authConfig.client_id) {
-      setupAuthGate();
-      // Stay on the auth gate until Google callback signs us in.
+    if (!state.authConfig || !state.authConfig.client_id) {
+      showFatalError(
+        "Sign-in is required. Missing or empty auth.config.json. " +
+        "Copy auth.config.json.example to auth.config.json and fill in " +
+        "the Google OAuth client_id + editor allowlist."
+      );
       return;
     }
-    setBadge("auth-status", "auth: disabled", "muted");
-    await launchApp();
+    setupAuthGate();
+    // Stay on the auth gate until Google callback signs us in.
   } catch (err) {
     console.error(err);
     showFatalError(err.message || String(err));
@@ -104,12 +139,18 @@ const state = {
 })();
 
 async function launchApp() {
+  // One-time migration: pre-multi-user builds wrote LS without an email
+  // suffix. Move that data into the namespaced slot the first time *this*
+  // user signs in and the namespaced slot is empty.
+  migrateUnNamespacedLS();
+
   // Load snapshot.json (the GitHub Action commits it).
   const snap = await fetchSnapshot();
   state.snapshot = snap;
   state.rows = snap.depth.rows.map(r => ({ ...r }));
   state.baseline = new Map(snap.depth.rows.map(r => [r._sheet_row, { ...r }]));
   setSnapshotAgeBadge(snap.generated_at);
+  maybeShowStaleSnapshotBanner(snap.generated_at);
 
   // Optional: load OurLads snapshot if the workflow has committed one.
   state.ourlads = await tryFetchJSON("./data/ourlads.json");
@@ -131,7 +172,7 @@ async function launchApp() {
   populateRosterSuggestions();
 
   if (!state.currentTeam) {
-    const stored = localStorage.getItem("depthchart_team");
+    const stored = localStorage.getItem(lsKeyTeam());
     state.currentTeam = stored && teamList().includes(stored)
       ? stored
       : (teamList().includes("ARZ") ? "ARZ" : teamList()[0]);
@@ -144,6 +185,33 @@ async function launchApp() {
 
   // Compute and render warnings.
   rebuildWarnings();
+
+  // Multi-user: poll lock state, start a heartbeat for any lock we hold, and
+  // warn the user before they leave with unsynced edits.
+  await refreshLocks();
+  setInterval(refreshLocks, LOCKS_POLL_MS);
+  setInterval(heartbeatTick, LOCK_HEARTBEAT_MS);
+  window.addEventListener("beforeunload", onBeforeUnload);
+
+  // Initial state for the team picker: if we previously held a lock for this
+  // team in another tab/session, surface it on first paint.
+  syncTeamPickerLockUI();
+}
+
+function migrateUnNamespacedLS() {
+  const pairs = [
+    [LS_KEY_BASE, lsKeyEdits()],
+    [LS_DISMISSED_BASE, lsKeyDismissed()],
+    [LS_TEAM_BASE, lsKeyTeam()],
+  ];
+  for (const [oldKey, newKey] of pairs) {
+    try {
+      const legacy = localStorage.getItem(oldKey);
+      if (!legacy) continue;
+      if (localStorage.getItem(newKey)) continue; // user's slot already populated
+      localStorage.setItem(newKey, legacy);
+    } catch {}
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -196,14 +264,12 @@ function renderShell() {
   app.innerHTML = "";
   app.appendChild(tpl.content.cloneNode(true));
 
-  document.getElementById("team-select").addEventListener("change", e => {
-    state.currentTeam = e.target.value;
-    state.currentCategory = null;
-    localStorage.setItem("depthchart_team", state.currentTeam);
-    document.getElementById("add-row-team").textContent = state.currentTeam;
-    document.getElementById("add-custom-team").textContent = state.currentTeam;
-    renderTeamView();
-  });
+  document.getElementById("team-select").addEventListener("change", onTeamSelectChange);
+  // Toolbar lock buttons.
+  const acquireBtn = document.getElementById("acquire-lock-btn");
+  if (acquireBtn) acquireBtn.addEventListener("click", () => acquireCurrentTeamLock());
+  const releaseBtn = document.getElementById("release-lock-btn");
+  if (releaseBtn) releaseBtn.addEventListener("click", () => releaseCurrentLock());
 
   document.getElementById("refresh-btn").addEventListener("click", async () => {
     if (state.editedRowKeys.size > 0 && !confirm("Refreshing will keep your in-memory edits. Continue?")) return;
@@ -492,6 +558,12 @@ function renderSelectCell(r, key, val, options) {
 // ---------------------------------------------------------------------------
 
 function recordEdit(row, key, newValue) {
+  if (!canEditRow(row)) {
+    toast(lockGateMessage(row), 4000);
+    // Re-render so the input snaps back to its current value visually.
+    renderTeamView();
+    return;
+  }
   const before = row[key];
   const after = BOOL_KEYS.has(key) ? !!newValue : String(newValue);
   if (String(before ?? "") === String(after ?? "")) return;
@@ -514,13 +586,32 @@ function recordEdit(row, key, newValue) {
   rebuildWarnings();
 }
 
+// Lock-aware row gate. FA is intentionally unlocked: it's the league-wide
+// bucket of unsigned players, treated like a scratchpad rather than a team.
+// Without an Apps Script URL configured we can't audit-log or enforce locks,
+// so all edits (including FA) are blocked until Settings is filled in.
+function canEditRow(row) {
+  if (!getSyncUrl()) return false;
+  const t = (row && row.team || "").trim().toUpperCase();
+  if (!t || t === FA_TEAM) return true;
+  return state.myLock && state.myLock.team === t;
+}
+function lockGateMessage(row) {
+  if (!getSyncUrl()) return "Open Settings (⚙) and paste the Apps Script URL before editing.";
+  const t = (row && row.team || "").trim().toUpperCase() || "this team";
+  if (state.myLock && state.myLock.team !== t) {
+    return "You hold the lock for " + state.myLock.team + ", not " + t + ".";
+  }
+  return "Acquire the lock for " + t + " before editing.";
+}
+
 function persistEdits() {
   try {
     const payload = {
       edits: state.edits,
       ts: new Date().toISOString(),
     };
-    localStorage.setItem(LS_KEY, JSON.stringify(payload));
+    localStorage.setItem(lsKeyEdits(), JSON.stringify(payload));
   } catch (err) {
     console.warn("localStorage full or unavailable:", err);
   }
@@ -528,7 +619,7 @@ function persistEdits() {
 
 function restoreEditsFromLocalStorage() {
   try {
-    const raw = localStorage.getItem(LS_KEY);
+    const raw = localStorage.getItem(lsKeyEdits());
     if (!raw) return;
     const payload = JSON.parse(raw);
     state.edits = payload.edits || [];
@@ -556,6 +647,284 @@ function updateEditCount() {
   el.textContent = `${n} edit${n === 1 ? "" : "s"}`;
   el.classList.toggle("badge--muted", n === 0);
   el.classList.toggle("badge--accent", n > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-user locks (browser side)
+// ---------------------------------------------------------------------------
+
+function canEditTeam(team) {
+  if (!getSyncUrl()) return false;
+  const t = (team || "").trim().toUpperCase();
+  if (!t || t === FA_TEAM) return true;
+  return state.myLock && state.myLock.team === t;
+}
+
+async function refreshLocks() {
+  const url = getSyncUrl();
+  if (!url) return;  // Settings not configured yet; nothing to do.
+  try {
+    const resp = await fetch(url + "?action=listLocks", { redirect: "follow" });
+    if (!resp.ok) return;
+    const body = await resp.json();
+    if (!body || !body.ok) return;
+    state.allLocks = body.locks || [];
+    state.locksFetchedAt = Date.now();
+    if (typeof body.ttl_seconds === "number") state.ttlSeconds = body.ttl_seconds;
+
+    // Reconcile myLock from server truth — another tab may have released it.
+    const mine = state.allLocks.find((l) => l.owner_email === state.authedEmail && !l.expired);
+    state.myLock = mine ? { ...mine } : null;
+
+    syncTeamPickerLockUI();
+    renderLocksPanel();
+  } catch (err) {
+    console.warn("refreshLocks failed:", err);
+  }
+}
+
+async function heartbeatTick() {
+  if (!state.myLock) return;
+  const url = getSyncUrl();
+  if (!url) return;
+  try {
+    const resp = await _postToSync({ action: "heartbeatLock", team: state.myLock.team });
+    if (resp && resp.ok && resp.lock) {
+      state.myLock = { ...resp.lock };
+    } else if (resp && resp.error === "no_lock") {
+      // We were force-released. Surface it.
+      const stolen = state.myLock && state.myLock.team;
+      state.myLock = null;
+      toast("Your lock on " + stolen + " was released by another editor.", 6000);
+      syncTeamPickerLockUI();
+    }
+  } catch (err) {
+    console.warn("heartbeat failed:", err);
+  }
+}
+
+async function acquireLock(team) {
+  const url = getSyncUrl();
+  if (!url) {
+    toast("Sync URL not set. Open Settings (⚙) and configure it before editing.", 5000);
+    return null;
+  }
+  try {
+    const resp = await _postToSync({ action: "acquireLock", team });
+    if (resp && resp.ok && resp.lock) {
+      state.myLock = { ...resp.lock };
+      if (resp.stolen_from) {
+        toast(`Took lock on ${team} (previous owner ${resp.stolen_from} was idle).`, 5000);
+      } else {
+        toast(`Lock acquired: ${team}.`, 3000);
+      }
+      await refreshLocks();
+      return state.myLock;
+    }
+    if (resp && resp.error === "locked_by_other") {
+      toast(`${team} is locked by ${resp.owner_email}.`, 5000);
+    } else if (resp && resp.error === "already_holding_other") {
+      toast(`Release ${resp.held_team} first.`, 5000);
+    } else if (resp && resp.error === "fa_not_lockable") {
+      // Shouldn't happen — caller filters FA — but be defensive.
+      return null;
+    } else {
+      toast("Could not acquire lock: " + (resp && resp.error || "unknown"), 5000);
+    }
+    return null;
+  } catch (err) {
+    toast("Lock acquire failed: " + (err.message || err), 5000);
+    return null;
+  }
+}
+
+async function releaseLock(team) {
+  const url = getSyncUrl();
+  if (!url) return false;
+  try {
+    const resp = await _postToSync({ action: "releaseLock", team });
+    if (resp && resp.ok) {
+      if (state.myLock && state.myLock.team === team) state.myLock = null;
+      toast(`Released lock on ${team}.`, 3000);
+      await refreshLocks();
+      return true;
+    }
+    toast("Release failed: " + (resp && resp.error || "unknown"), 5000);
+    return false;
+  } catch (err) {
+    toast("Release failed: " + (err.message || err), 5000);
+    return false;
+  }
+}
+
+async function releaseCurrentLock() {
+  if (!state.myLock) { toast("No lock held.", 2000); return; }
+  const team = state.myLock.team;
+  const pending = state.editedRowKeys.size > 0;
+  if (pending && !confirm(`You have ${state.edits.length} unsynced edit(s). Release ${team} anyway? Edits stay in your browser.`)) return;
+  await releaseLock(team);
+  syncTeamPickerLockUI();
+}
+
+async function acquireCurrentTeamLock() {
+  const team = (state.currentTeam || "").trim().toUpperCase();
+  if (!team) return;
+  if (team === FA_TEAM) { toast("FA isn't locked — edits go straight in.", 3000); return; }
+  if (state.myLock && state.myLock.team === team) { toast("You already hold " + team + ".", 2000); return; }
+  if (state.myLock && state.myLock.team !== team) {
+    if (!confirm(`You currently hold ${state.myLock.team}. Release it and lock ${team}?`)) return;
+    const released = await releaseLock(state.myLock.team);
+    if (!released) return;
+  }
+  await acquireLock(team);
+  syncTeamPickerLockUI();
+}
+
+async function onTeamSelectChange(e) {
+  const desired = (e.target.value || "").trim().toUpperCase();
+  const prev = (state.currentTeam || "").trim().toUpperCase();
+  if (!desired || desired === prev) return;
+
+  // No Apps Script URL configured → lock infra unavailable; allow free
+  // navigation so the editor remains browsable, edits are still blocked by
+  // canEditRow until Settings is filled in.
+  if (!getSyncUrl()) {
+    commitTeamSwitch(desired);
+    return;
+  }
+
+  // FA is unlocked: editors can drop into FA without releasing their team.
+  if (desired === FA_TEAM) {
+    commitTeamSwitch(desired);
+    return;
+  }
+
+  // Holding a different team? Must release first.
+  if (state.myLock && state.myLock.team !== desired) {
+    if (!confirm(`You currently hold ${state.myLock.team}. Release it and lock ${desired}?`)) {
+      // Snap back.
+      e.target.value = state.currentTeam;
+      return;
+    }
+    const released = await releaseLock(state.myLock.team);
+    if (!released) {
+      e.target.value = state.currentTeam;
+      return;
+    }
+  }
+
+  // Refresh locks so we know who (if anyone) owns the desired team right now.
+  await refreshLocks();
+  const held = state.allLocks.find((l) => l.team === desired && !l.expired);
+  if (held && held.owner_email !== state.authedEmail) {
+    toast(`${desired} is currently being edited by ${held.owner_email}.`, 6000);
+    e.target.value = state.currentTeam;
+    return;
+  }
+
+  const got = await acquireLock(desired);
+  if (!got) {
+    e.target.value = state.currentTeam;
+    return;
+  }
+  commitTeamSwitch(desired);
+}
+
+function commitTeamSwitch(team) {
+  state.currentTeam = team;
+  state.currentCategory = null;
+  try { localStorage.setItem(lsKeyTeam(), team); } catch {}
+  const addTeamEl = document.getElementById("add-row-team");
+  const addCustomEl = document.getElementById("add-custom-team");
+  if (addTeamEl) addTeamEl.textContent = team;
+  if (addCustomEl) addCustomEl.textContent = team;
+  renderTeamView();
+  syncTeamPickerLockUI();
+}
+
+function syncTeamPickerLockUI() {
+  const sel = document.getElementById("team-select");
+  if (!sel) return;
+  const byTeam = new Map();
+  for (const l of state.allLocks || []) {
+    if (!l.expired) byTeam.set(l.team, l);
+  }
+  for (const opt of sel.options) {
+    const t = (opt.value || "").trim().toUpperCase();
+    const l = byTeam.get(t);
+    if (!l || t === FA_TEAM) {
+      opt.textContent = opt.value;
+      opt.disabled = false;
+      continue;
+    }
+    if (l.owner_email === state.authedEmail) {
+      opt.textContent = opt.value + "  🔓 you";
+      opt.disabled = false;
+    } else {
+      opt.textContent = opt.value + "  🔒 " + l.owner_email;
+      opt.disabled = (t !== state.currentTeam);  // keep selection valid
+    }
+  }
+  const releaseBtn = document.getElementById("release-lock-btn");
+  const acquireBtn = document.getElementById("acquire-lock-btn");
+  const heldBadge  = document.getElementById("lock-held-badge");
+  const currentTeam = (state.currentTeam || "").trim().toUpperCase();
+  const isFA = currentTeam === FA_TEAM;
+  const heldByMeHere = state.myLock && state.myLock.team === currentTeam;
+  if (acquireBtn) {
+    acquireBtn.style.display = (!heldByMeHere && !isFA && getSyncUrl()) ? "inline-flex" : "none";
+    acquireBtn.textContent = state.myLock ? "Switch lock to " + currentTeam : "Lock " + currentTeam;
+  }
+  if (releaseBtn) releaseBtn.style.display = state.myLock ? "inline-flex" : "none";
+  if (heldBadge) {
+    if (state.myLock) {
+      heldBadge.textContent = "🔓 " + state.myLock.team;
+      heldBadge.style.display = "inline-flex";
+    } else {
+      heldBadge.style.display = "none";
+    }
+  }
+}
+
+function renderLocksPanel() {
+  const list = document.getElementById("locks-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const active = (state.allLocks || []).filter((l) => !l.expired);
+  if (active.length === 0) {
+    const li = document.createElement("li");
+    li.className = "muted";
+    li.textContent = "Nobody is locked into a team right now.";
+    list.appendChild(li);
+    return;
+  }
+  for (const l of active) {
+    const li = document.createElement("li");
+    const mine = l.owner_email === state.authedEmail;
+    li.innerHTML = `<strong>${escapeHTML(l.team)}</strong>` +
+      ` — ${escapeHTML(l.owner_email)}${mine ? " (you)" : ""}` +
+      ` <span class="muted">${Math.floor((l.idle_seconds || 0) / 60)}m idle</span>`;
+    list.appendChild(li);
+  }
+}
+
+function maybeShowStaleSnapshotBanner(generatedAt) {
+  if (!generatedAt) return;
+  const ageMin = (Date.now() - new Date(generatedAt).getTime()) / 60000;
+  if (ageMin < SNAPSHOT_STALE_MIN) return;
+  const banner = document.getElementById("stale-snapshot-banner");
+  if (!banner) return;
+  banner.textContent =
+    `Snapshot is ${Math.round(ageMin)} min old. Click Refresh before editing to avoid stale-write conflicts.`;
+  banner.style.display = "block";
+}
+
+function onBeforeUnload(e) {
+  if (state.myLock && state.editedRowKeys.size > 0) {
+    e.preventDefault();
+    e.returnValue = "";
+    return "";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -643,6 +1012,7 @@ function _rosterMatch(name) {
 
 function onAddPlayer() {
   const team = state.currentTeam;
+  if (!canEditTeam(team)) { toast(lockGateMessage({ team }), 4000); return; }
   const name = document.getElementById("add-player-search").value.trim();
   const pos  = document.getElementById("add-position").value;
   const cat  = document.getElementById("add-category").value;
@@ -701,6 +1071,7 @@ function onAddPlayer() {
 
 function onAddCustomPlayer() {
   const team = state.currentTeam;
+  if (!canEditTeam(team)) { toast(lockGateMessage({ team }), 4000); return; }
   const name = document.getElementById("add-custom-name").value.trim();
   const pos  = document.getElementById("add-custom-position").value;
   const cat  = document.getElementById("add-custom-category").value;
@@ -1295,12 +1666,16 @@ function navigateToRow(target) {
   if (!target) return;
   openWarnings(false);
   if (target.team && target.team !== state.currentTeam) {
+    // Warnings-driven navigation is read-only: switch view without acquiring
+    // a lock. Edits on the destination team will still be blocked until the
+    // user explicitly clicks "Lock team".
     state.currentTeam = target.team;
     state.currentCategory = null;
-    localStorage.setItem("depthchart_team", state.currentTeam);
+    try { localStorage.setItem(lsKeyTeam(), state.currentTeam); } catch {}
     document.getElementById("team-select").value = state.currentTeam;
     document.getElementById("add-row-team").textContent = state.currentTeam;
     document.getElementById("add-custom-team").textContent = state.currentTeam;
+    syncTeamPickerLockUI();
   }
 
   // Find the row, switch its category if needed, then highlight.
@@ -1338,14 +1713,14 @@ function openWarnings(open) {
 
 function persistDismissedWarnings() {
   try {
-    localStorage.setItem(LS_DISMISSED, JSON.stringify([...state.dismissedWarningIds]));
+    localStorage.setItem(lsKeyDismissed(), JSON.stringify([...state.dismissedWarningIds]));
   } catch (err) {
     console.warn("dismiss persistence failed", err);
   }
 }
 function restoreDismissedWarnings() {
   try {
-    const raw = localStorage.getItem(LS_DISMISSED);
+    const raw = localStorage.getItem(lsKeyDismissed());
     if (!raw) return;
     state.dismissedWarningIds = new Set(JSON.parse(raw) || []);
   } catch {}
@@ -1388,6 +1763,9 @@ function onSaveSettings() {
   else     localStorage.removeItem(LS_SYNC_URL);
   localStorage.setItem(LS_TARGET_TAB, tab);
   setSettingsStatus("Saved.", "ok");
+  // Newly-configured URL → poll immediately so the lock badges populate
+  // without waiting for the 30 s interval.
+  if (url) refreshLocks().catch(() => {});
 }
 
 function onClearSettings() {
@@ -1544,7 +1922,7 @@ async function onSyncToSheet() {
     if (!preview.ok) {
       showSyncModal({
         phase: "error",
-        message: "Server refused: " + (preview.error || "unknown"),
+        message: formatSyncError(preview),
       });
       return;
     }
@@ -1554,6 +1932,23 @@ async function onSyncToSheet() {
   }
 }
 
+function formatSyncError(resp) {
+  if (!resp) return "Unknown server error.";
+  if (resp.error === "missing_lock") {
+    const missing = (resp.teams_missing || []).join(", ");
+    const others  = (resp.teams_held_by_others || [])
+      .map((h) => `${h.team} (held by ${h.owner_email})`)
+      .join(", ");
+    const parts = [];
+    if (missing) parts.push("teams not locked by you: " + missing);
+    if (others)  parts.push("teams locked by others: " + others);
+    return "Sync refused — " + (parts.join("; ") || "you don't hold the right locks.");
+  }
+  if (resp.error === "sign_in_required") return "The server didn't see a Google identity. Sign out and back in.";
+  if (resp.error === "not_authorized")   return "Your account isn't on the Apps Script editor allowlist.";
+  return "Server refused: " + (resp.error || "unknown");
+}
+
 async function _syncCommit() {
   showSyncModal({ phase: "loading", message: "Writing to sheet…" });
   try {
@@ -1561,7 +1956,7 @@ async function _syncCommit() {
     if (!result.ok) {
       showSyncModal({
         phase: "error",
-        message: "Server refused: " + (result.error || "unknown"),
+        message: formatSyncError(result),
       });
       return;
     }
@@ -1608,6 +2003,7 @@ function showSyncModal({ phase, message, result }) {
     summary.innerHTML = `Wrote <strong>${r.cells_written ?? 0}</strong> cells; appended <strong>${r.appended_rows ?? 0}</strong> new rows`
       + (r.appended_at_row ? ` starting at row ${r.appended_at_row}` : "")
       + (typeof r.elapsed_ms === "number" ? ` in ${r.elapsed_ms} ms` : "")
+      + (r.actor_email ? ` as <code>${escapeHTML(r.actor_email)}</code>` : "")
       + ".";
     body.appendChild(summary);
     foot.appendChild(_modalButton("Done", "btn--primary", closeSyncModal));
@@ -1761,8 +2157,14 @@ function showAuthError(msg) {
   document.getElementById("auth-error").textContent = msg;
 }
 
-function signOut() {
+async function signOut() {
+  // Best-effort: drop any lock we hold so peers aren't blocked.
+  if (state.myLock) {
+    try { await releaseLock(state.myLock.team); } catch {}
+  }
   state.authedEmail = null;
+  state.myLock = null;
+  state.allLocks = [];
   if (window.google && google.accounts && google.accounts.id) {
     google.accounts.id.disableAutoSelect();
   }

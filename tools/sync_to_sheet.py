@@ -38,6 +38,12 @@ SPREADSHEET_ID = "1XHXiR__p7h2JVLKNkS-F9aiKZjhar78YubQklW_baQA"
 DEFAULT_TARGET_TAB = "Copy of DepthCharts"
 PROD_TAB = "DepthCharts"
 
+# The CLI bypasses the lock system the Apps Script web app enforces. Every
+# commit appends a row per change to AUDIT_TAB so the team-locks story stays
+# consistent: even out-of-band writes show up in the audit trail.
+AUDIT_TAB = "AuditLog"
+AUDIT_HEADERS = ["ts", "actor_email", "action", "team", "sheet_row", "column", "before", "after", "details"]
+
 # Header zone in the target tab. Row 4 (1-based) carries cell notes that
 # define the JSON key for each column; row 5 is the first data row.
 HEADER_NOTE_ROW_INDEX = 3   # 0-based
@@ -89,6 +95,13 @@ def parse_args() -> argparse.Namespace:
                    help="Actually write the changes. Without this, runs as a dry-run.")
     p.add_argument("--allow-prod", action="store_true",
                    help="Allow writing to the live DepthCharts tab. Default: refused.")
+    p.add_argument("--allow-bypass-locks", action="store_true",
+                   help="Required for any --commit: acknowledges the CLI bypasses the "
+                        "team-lock system the web app enforces. Every change is still "
+                        "recorded to the AuditLog tab.")
+    p.add_argument("--actor", default=None,
+                   help="Email to record in AuditLog (defaults to the service-account "
+                        "client_email if omitted).")
     p.add_argument("--key", default=None,
                    help="Service-account key path (defaults to FP_DATA_KEY_PATH).")
     p.add_argument("--preview-rows", type=int, default=10,
@@ -238,6 +251,85 @@ def apply_updates(svc, tab: str, updates: list[tuple[int, list[tuple[int, str]]]
     return result.get("totalUpdatedCells", 0)
 
 
+def ensure_audit_tab(svc) -> None:
+    """Create the AuditLog tab with headers if it doesn't exist yet."""
+    meta = svc.spreadsheets().get(
+        spreadsheetId=SPREADSHEET_ID, fields="sheets(properties(title))"
+    ).execute()
+    titles = {s["properties"]["title"] for s in meta.get("sheets", [])}
+    if AUDIT_TAB in titles:
+        return
+    svc.spreadsheets().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": AUDIT_TAB}}}]},
+    ).execute()
+    svc.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{AUDIT_TAB}'!A1:{a1_col(len(AUDIT_HEADERS) - 1)}1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [AUDIT_HEADERS]},
+    ).execute()
+
+
+def write_audit_rows(svc, rows: list[list[Any]]) -> int:
+    """Append rows to the AuditLog tab. Returns count appended."""
+    if not rows:
+        return 0
+    ensure_audit_tab(svc)
+    result = svc.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{AUDIT_TAB}'!A1",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body={"values": rows},
+    ).execute()
+    return result.get("updates", {}).get("updatedRows", 0)
+
+
+def build_audit_rows(
+    actor: str,
+    target_tab: str,
+    updates: list[tuple[int, list[tuple[int, str]]]],
+    appends: list[dict],
+    target: dict[str, Any],
+    export: dict[str, Any],
+) -> list[list[Any]]:
+    """Mirror the Apps Script audit schema for a CLI-bypass commit."""
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).isoformat()
+    col_to_key = {c: k for k, c in target["key_to_col"].items()}
+    # Map sheet_row -> team via the export rows the CLI just wrote.
+    team_by_row: dict[int, str] = {}
+    for row in export.get("rows", []):
+        sr = int(row.get("_sheet_row") or 0)
+        if sr:
+            team_by_row[sr] = str(row.get("team") or "").strip().upper()
+    details_json = json.dumps({"target_tab": target_tab, "via": "cli_bypass"})
+    out: list[list[Any]] = []
+    for sheet_row, cells in updates:
+        cur = target["current"].get(sheet_row, {})
+        for col, val in cells:
+            key = col_to_key.get(col, "")
+            before = cur.get(key, "")
+            out.append([
+                ts, actor, "cli_bypass", team_by_row.get(sheet_row, ""),
+                sheet_row, key, before, val, details_json,
+            ])
+    for row in appends:
+        out.append([
+            ts, actor, "cli_bypass_append",
+            str(row.get("team") or "").strip().upper(),
+            "", "displayName", "", str(row.get("displayName") or ""),
+            json.dumps({
+                "target_tab": target_tab,
+                "via": "cli_bypass",
+                "eliasId": row.get("eliasId", ""),
+                "position": row.get("position", ""),
+            }),
+        ])
+    return out
+
+
 def apply_appends(
     svc, tab: str, appends: list[dict], target: dict[str, Any], start_row: int,
 ) -> int:
@@ -287,6 +379,13 @@ def main() -> int:
         sys.exit(
             f"Refusing to write to {PROD_TAB!r}. Re-run with --allow-prod "
             "if you really mean it (and ideally with --commit only on a test tab first)."
+        )
+
+    if args.commit and not args.allow_bypass_locks:
+        sys.exit(
+            "The CLI bypasses the team-lock system enforced by the web app. "
+            "Re-run with --allow-bypass-locks to acknowledge this. Every change "
+            f"is still recorded to the {AUDIT_TAB!r} tab."
         )
 
     if not args.commit:
@@ -354,6 +453,17 @@ def main() -> int:
         print(f"Appending {len(appends)} new rows starting at sheet row {start_row}...")
         n_appended = apply_appends(svc, args.tab, appends, target, start_row)
         print(f"  wrote {n_appended} cells across new rows")
+
+    actor = (args.actor or "").strip()
+    if not actor:
+        try:
+            actor = json.loads(Path(args.key or DEFAULT_KEY_PATH).read_text()).get("client_email", "service-account")
+        except Exception:
+            actor = "service-account"
+    audit_rows = build_audit_rows(actor, args.tab, updates, appends, target, export)
+    if audit_rows:
+        n_audit = write_audit_rows(svc, audit_rows)
+        print(f"AuditLog: appended {n_audit} cli_bypass row(s) as {actor!r}.")
 
     print("\nDone.")
     return 0

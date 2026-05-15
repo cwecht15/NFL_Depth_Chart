@@ -36,17 +36,53 @@ const MANUAL_KEYS = new Set([
   "displayName", "firstName", "lastName", "footballName",
 ]);
 
-// Optional editor allowlist. Set deployment to "Anyone with Google account",
-// then put approved emails here. Leave empty to allow any signed-in account.
+// Editor allowlist. Must match the `allowlist` in docs/auth.config.json.
+// Set deployment to "Anyone with Google account"; this is the second check.
 const EDITOR_ALLOWLIST = [
-  // "alice@example.com",
+  "cwecht8@gmail.com",
+  "tbmoore2016@gmail.com",
 ];
+
+// Admins who may call forceReleaseLock to clear someone else's lock without
+// waiting for TTL. Empty = nobody (TTL expiry is still automatic).
+const LOCK_ADMIN_ALLOWLIST = [
+  "cwecht8@gmail.com",
+  "tbmoore2016@gmail.com",
+];
+
+// === Multi-user locks =====================================================
+//
+// Two operational tabs persist multi-user state on the same workbook:
+//   - LOCKS_TAB:    one row per actively-edited team (FA never locks)
+//   - AUDIT_TAB:    append-only log of who changed what (and lock events)
+//
+// Choosing tabs over PropertiesService is deliberate: tabs are human-
+// inspectable, survive script redeploys, and can be hand-edited if a lock
+// gets stuck (e.g., during incident response).
+
+const LOCKS_TAB  = "Locks";
+const AUDIT_TAB  = "AuditLog";
+
+const LOCKS_HEADERS = ["team", "owner_email", "acquired_at", "last_heartbeat_at"];
+const AUDIT_HEADERS = ["ts", "actor_email", "action", "team", "sheet_row", "column", "before", "after", "details"];
+
+// Lock expires after 30 min of no heartbeat. Browser sends heartbeat every
+// 2 min; LOCK_TTL_SECONDS is the absolute idle threshold past which a peer
+// may force-take.
+const LOCK_TTL_SECONDS = 30 * 60;
+
+// Free-agent placeholder; never locked.
+const FA_TEAM = "FA";
 
 // === HTTP entry points ====================================================
 
-function doGet(_e) {
-  // Health-check. Returns a small JSON so the web app can confirm the URL
-  // is wired up correctly without doing a write.
+function doGet(e) {
+  // Health-check + lightweight read endpoints. `?action=listLocks` lets the
+  // browser poll lock state without paying the full handler cost.
+  const action = (e && e.parameter && e.parameter.action || "").toLowerCase();
+  if (action === "listlocks") {
+    return _json(handleListLocks());
+  }
   return _json({
     ok: true,
     service: "DepthChart sync",
@@ -62,19 +98,42 @@ function doPost(e) {
     // so the body is still raw JSON.
     const payload = JSON.parse(e.postData.contents || "{}");
 
+    // Verified identity. Body fields like `payload.editor` are informational
+    // only — anything that has side effects uses this.
+    const actorEmail = Session.getActiveUser().getEmail() || "";
+
     if (EDITOR_ALLOWLIST.length > 0) {
-      const email = Session.getActiveUser().getEmail();
-      if (!email || !EDITOR_ALLOWLIST.includes(email)) {
-        return _json({ ok: false, error: "not_authorized", email: email || null }, 403);
+      if (!actorEmail || !EDITOR_ALLOWLIST.includes(actorEmail)) {
+        return _json({ ok: false, error: "not_authorized", email: actorEmail || null }, 403);
       }
+    }
+    if (!actorEmail) {
+      return _json({ ok: false, error: "sign_in_required" }, 401);
     }
 
     const action = (payload.action || "sync").toLowerCase();
     let result;
-    if (action === "snapshot") {
-      result = handleSnapshot(payload);
-    } else {
-      result = handleSync(payload);
+    switch (action) {
+      case "snapshot":
+        result = handleSnapshot(payload);
+        break;
+      case "acquirelock":
+        result = handleAcquireLock(payload, actorEmail);
+        break;
+      case "releaselock":
+        result = handleReleaseLock(payload, actorEmail);
+        break;
+      case "heartbeatlock":
+        result = handleHeartbeatLock(payload, actorEmail);
+        break;
+      case "listlocks":
+        result = handleListLocks();
+        break;
+      case "forcereleaselock":
+        result = handleForceReleaseLock(payload, actorEmail);
+        break;
+      default:
+        result = handleSync(payload, actorEmail);
     }
     return _json(result);
   } catch (err) {
@@ -84,10 +143,11 @@ function doPost(e) {
 
 // === Core =================================================================
 
-function handleSync(payload) {
+function handleSync(payload, actorEmail) {
   const targetTab = payload.target_tab || DEFAULT_TARGET_TAB;
   const commit    = !!payload.commit;
   const allowProd = !!payload.allow_prod;
+  actorEmail = actorEmail || Session.getActiveUser().getEmail() || "";
 
   if (targetTab === PROD_TAB && !allowProd) {
     throw new Error(
@@ -106,6 +166,22 @@ function handleSync(payload) {
   const target = _readTargetTab(sheet);
 
   const { updates, appends } = _computeDiff(rows, target);
+
+  // Lock gate: every distinct team touched by either an update or an append
+  // (FA excluded) must be locked by the caller. Dry-runs are gated too so
+  // users find out before they bother to commit.
+  const teamsTouched = _teamsTouchedByDiff(updates, appends, target, rows);
+  const lockCheck = _verifyCallerHoldsLocks(ss, actorEmail, teamsTouched);
+  if (!lockCheck.ok) {
+    return {
+      ok: false,
+      error: "missing_lock",
+      message: "You must hold a lock for every team you're editing.",
+      teams_required: teamsTouched,
+      teams_missing: lockCheck.missing,
+      teams_held_by_others: lockCheck.heldByOthers,
+    };
+  }
 
   const summary = {
     ok: true,
@@ -142,7 +218,14 @@ function handleSync(payload) {
     summary.appended_rows = appendInfo.numRows;
   }
   summary.elapsed_ms = Date.now() - t0;
-  summary.editor_email = Session.getActiveUser().getEmail() || null;
+  summary.actor_email = actorEmail || null;
+  // Backwards compat with earlier client builds that displayed editor_email.
+  summary.editor_email = summary.actor_email;
+
+  // Audit-log one row per applied cell change, using the row's team from the
+  // payload (the sheet update may not have included team in the diff).
+  _writeAuditRows(ss, _buildAuditEntries(updates, appends, rows, actorEmail, targetTab));
+
   return summary;
 }
 
@@ -386,4 +469,344 @@ function _json(obj, status) {
   return ContentService
     .createTextOutput(JSON.stringify(body))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// === Lock handlers ========================================================
+
+function handleAcquireLock(payload, actorEmail) {
+  const team = _normalizeTeam(payload.team);
+  if (!team) return { ok: false, error: "missing_team" };
+  if (team === FA_TEAM) return { ok: false, error: "fa_not_lockable" };
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const scriptLock = LockService.getScriptLock();
+  if (!scriptLock.tryLock(5000)) {
+    return { ok: false, error: "service_busy" };
+  }
+  try {
+    const sheet = _ensureLocksSheet(ss);
+    const state = _readLocks(sheet);
+    const now = new Date();
+
+    // Caller may not hold a different team simultaneously.
+    const mine = state.byOwner[actorEmail];
+    if (mine && mine.team !== team) {
+      return {
+        ok: false,
+        error: "already_holding_other",
+        held_team: mine.team,
+        message: "Release " + mine.team + " before locking another team.",
+      };
+    }
+
+    const existing = state.byTeam[team];
+    let stolenFrom = null;
+    if (existing && existing.owner_email !== actorEmail) {
+      const idleS = _idleSeconds(existing, now);
+      if (idleS < LOCK_TTL_SECONDS) {
+        return {
+          ok: false,
+          error: "locked_by_other",
+          owner_email: existing.owner_email,
+          acquired_at: existing.acquired_at,
+          last_heartbeat_at: existing.last_heartbeat_at,
+          ttl_remaining_s: Math.max(0, LOCK_TTL_SECONDS - idleS),
+        };
+      }
+      // Past TTL → steal.
+      stolenFrom = existing.owner_email;
+      _writeAuditRows(ss, [_auditRow(now, actorEmail, "lock_stolen", team, {
+        from: stolenFrom,
+        idle_seconds: idleS,
+      })]);
+    }
+
+    const lock = {
+      team: team,
+      owner_email: actorEmail,
+      acquired_at: now.toISOString(),
+      last_heartbeat_at: now.toISOString(),
+    };
+    _upsertLock(sheet, state, lock);
+    _writeAuditRows(ss, [_auditRow(now, actorEmail, stolenFrom ? "lock_acquired_after_steal" : "lock_acquired", team, stolenFrom ? { from: stolenFrom } : null)]);
+
+    return { ok: true, lock: lock, stolen_from: stolenFrom };
+  } finally {
+    scriptLock.releaseLock();
+  }
+}
+
+function handleReleaseLock(payload, actorEmail) {
+  const team = _normalizeTeam(payload.team);
+  if (!team) return { ok: false, error: "missing_team" };
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const scriptLock = LockService.getScriptLock();
+  if (!scriptLock.tryLock(5000)) {
+    return { ok: false, error: "service_busy" };
+  }
+  try {
+    const sheet = _ensureLocksSheet(ss);
+    const state = _readLocks(sheet);
+    const existing = state.byTeam[team];
+    if (!existing) {
+      return { ok: true, released: false, note: "no_lock_for_team" };
+    }
+    if (existing.owner_email !== actorEmail) {
+      return { ok: false, error: "not_owner", owner_email: existing.owner_email };
+    }
+    _removeLockRow(sheet, state, team);
+    _writeAuditRows(ss, [_auditRow(new Date(), actorEmail, "lock_released", team, null)]);
+    return { ok: true, released: true };
+  } finally {
+    scriptLock.releaseLock();
+  }
+}
+
+function handleHeartbeatLock(payload, actorEmail) {
+  const team = _normalizeTeam(payload.team);
+  if (!team) return { ok: false, error: "missing_team" };
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const scriptLock = LockService.getScriptLock();
+  if (!scriptLock.tryLock(5000)) {
+    return { ok: false, error: "service_busy" };
+  }
+  try {
+    const sheet = _ensureLocksSheet(ss);
+    const state = _readLocks(sheet);
+    const existing = state.byTeam[team];
+    if (!existing) {
+      return { ok: false, error: "no_lock", message: "Lock for " + team + " no longer exists." };
+    }
+    if (existing.owner_email !== actorEmail) {
+      return { ok: false, error: "not_owner", owner_email: existing.owner_email };
+    }
+    const now = new Date();
+    existing.last_heartbeat_at = now.toISOString();
+    _upsertLock(sheet, state, existing);
+    return { ok: true, lock: existing };
+  } finally {
+    scriptLock.releaseLock();
+  }
+}
+
+function handleListLocks() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = _ensureLocksSheet(ss);
+  const state = _readLocks(sheet);
+  const now = new Date();
+  const locks = [];
+  for (const team of Object.keys(state.byTeam)) {
+    const l = state.byTeam[team];
+    const idleS = _idleSeconds(l, now);
+    locks.push({
+      team: l.team,
+      owner_email: l.owner_email,
+      acquired_at: l.acquired_at,
+      last_heartbeat_at: l.last_heartbeat_at,
+      idle_seconds: idleS,
+      expired: idleS >= LOCK_TTL_SECONDS,
+    });
+  }
+  return { ok: true, locks: locks, ttl_seconds: LOCK_TTL_SECONDS };
+}
+
+function handleForceReleaseLock(payload, actorEmail) {
+  if (LOCK_ADMIN_ALLOWLIST.length === 0 || LOCK_ADMIN_ALLOWLIST.indexOf(actorEmail) === -1) {
+    return { ok: false, error: "not_admin" };
+  }
+  const team = _normalizeTeam(payload.team);
+  if (!team) return { ok: false, error: "missing_team" };
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const scriptLock = LockService.getScriptLock();
+  if (!scriptLock.tryLock(5000)) {
+    return { ok: false, error: "service_busy" };
+  }
+  try {
+    const sheet = _ensureLocksSheet(ss);
+    const state = _readLocks(sheet);
+    const existing = state.byTeam[team];
+    if (!existing) {
+      return { ok: true, released: false, note: "no_lock_for_team" };
+    }
+    _removeLockRow(sheet, state, team);
+    _writeAuditRows(ss, [_auditRow(new Date(), actorEmail, "force_release", team, {
+      cleared_owner: existing.owner_email,
+    })]);
+    return { ok: true, released: true, cleared_owner: existing.owner_email };
+  } finally {
+    scriptLock.releaseLock();
+  }
+}
+
+// === Lock storage =========================================================
+
+function _ensureLocksSheet(ss) {
+  let sheet = ss.getSheetByName(LOCKS_TAB);
+  if (!sheet) {
+    sheet = ss.insertSheet(LOCKS_TAB);
+    sheet.getRange(1, 1, 1, LOCKS_HEADERS.length).setValues([LOCKS_HEADERS]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function _readLocks(sheet) {
+  const lastRow = sheet.getLastRow();
+  const byTeam = {};
+  const byOwner = {};
+  const rowsByTeam = {}; // team -> sheet row number for in-place edit
+  if (lastRow < 2) return { byTeam, byOwner, rowsByTeam };
+  const values = sheet.getRange(2, 1, lastRow - 1, LOCKS_HEADERS.length).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i];
+    const team = String(row[0] || "").trim();
+    if (!team) continue;
+    const rec = {
+      team: team,
+      owner_email: String(row[1] || "").trim(),
+      acquired_at: row[2] ? (row[2] instanceof Date ? row[2].toISOString() : String(row[2])) : "",
+      last_heartbeat_at: row[3] ? (row[3] instanceof Date ? row[3].toISOString() : String(row[3])) : "",
+    };
+    byTeam[team] = rec;
+    if (rec.owner_email) byOwner[rec.owner_email] = rec;
+    rowsByTeam[team] = i + 2; // header is row 1
+  }
+  return { byTeam, byOwner, rowsByTeam };
+}
+
+function _upsertLock(sheet, state, lock) {
+  const row = [lock.team, lock.owner_email, lock.acquired_at, lock.last_heartbeat_at];
+  const existingRow = state.rowsByTeam[lock.team];
+  if (existingRow) {
+    sheet.getRange(existingRow, 1, 1, LOCKS_HEADERS.length).setValues([row]);
+  } else {
+    sheet.appendRow(row);
+  }
+}
+
+function _removeLockRow(sheet, state, team) {
+  const r = state.rowsByTeam[team];
+  if (r) sheet.deleteRow(r);
+}
+
+function _idleSeconds(lock, now) {
+  const hb = lock.last_heartbeat_at || lock.acquired_at;
+  if (!hb) return Number.MAX_SAFE_INTEGER;
+  const t = Date.parse(hb);
+  if (!t) return Number.MAX_SAFE_INTEGER;
+  return Math.max(0, Math.floor((now.getTime() - t) / 1000));
+}
+
+function _normalizeTeam(t) {
+  return String(t == null ? "" : t).trim().toUpperCase();
+}
+
+function _verifyCallerHoldsLocks(ss, actorEmail, teamsTouched) {
+  const teams = (teamsTouched || []).filter(function (t) { return t && t !== FA_TEAM; });
+  if (teams.length === 0) return { ok: true, missing: [], heldByOthers: [] };
+  const sheet = _ensureLocksSheet(ss);
+  const state = _readLocks(sheet);
+  const now = new Date();
+  const missing = [];
+  const heldByOthers = [];
+  for (const team of teams) {
+    const l = state.byTeam[team];
+    if (!l) {
+      missing.push(team);
+      continue;
+    }
+    if (l.owner_email !== actorEmail) {
+      // Expired lock counts as missing (caller could re-acquire instead).
+      if (_idleSeconds(l, now) >= LOCK_TTL_SECONDS) {
+        missing.push(team);
+      } else {
+        heldByOthers.push({ team: team, owner_email: l.owner_email });
+      }
+    }
+  }
+  return { ok: missing.length === 0 && heldByOthers.length === 0, missing: missing, heldByOthers: heldByOthers };
+}
+
+function _teamsTouchedByDiff(updates, appends, target, payloadRows) {
+  // For updates we need to look up the team for each touched sheet_row. The
+  // payload's `rows` array is the authoritative team-per-row source.
+  const teamByRow = {};
+  for (const r of payloadRows || []) {
+    const sr = Number(r._sheet_row) || 0;
+    if (!sr) continue;
+    teamByRow[sr] = _normalizeTeam(r.team);
+  }
+  const set = {};
+  for (const u of updates) {
+    const t = teamByRow[u.row];
+    if (t) set[t] = true;
+  }
+  for (const a of appends) {
+    const t = _normalizeTeam(a.team);
+    if (t) set[t] = true;
+  }
+  return Object.keys(set);
+}
+
+// === Audit log ============================================================
+
+function _ensureAuditSheet(ss) {
+  let sheet = ss.getSheetByName(AUDIT_TAB);
+  if (!sheet) {
+    sheet = ss.insertSheet(AUDIT_TAB);
+    sheet.getRange(1, 1, 1, AUDIT_HEADERS.length).setValues([AUDIT_HEADERS]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function _auditRow(now, actorEmail, action, team, details) {
+  return [
+    now.toISOString(),
+    actorEmail || "",
+    action,
+    team || "",
+    "",     // sheet_row (unused for lock events)
+    "",     // column
+    "",     // before
+    "",     // after
+    details ? JSON.stringify(details) : "",
+  ];
+}
+
+function _buildAuditEntries(updates, appends, payloadRows, actorEmail, targetTab) {
+  const now = new Date();
+  const ts = now.toISOString();
+  const teamByRow = {};
+  for (const r of payloadRows || []) {
+    const sr = Number(r._sheet_row) || 0;
+    if (!sr) continue;
+    teamByRow[sr] = _normalizeTeam(r.team);
+  }
+  const out = [];
+  for (const u of updates) {
+    out.push([
+      ts, actorEmail, "edit", teamByRow[u.row] || "",
+      u.row, u.key, u.before, u.after,
+      JSON.stringify({ target_tab: targetTab }),
+    ]);
+  }
+  for (const a of appends) {
+    out.push([
+      ts, actorEmail, "append", _normalizeTeam(a.team),
+      "", "displayName", "", String(a.displayName || ""),
+      JSON.stringify({ target_tab: targetTab, eliasId: a.eliasId || "", position: a.position || "" }),
+    ]);
+  }
+  return out;
+}
+
+function _writeAuditRows(ss, rows) {
+  if (!rows || rows.length === 0) return;
+  const sheet = _ensureAuditSheet(ss);
+  const startRow = sheet.getLastRow() + 1;
+  sheet.getRange(startRow, 1, rows.length, AUDIT_HEADERS.length).setValues(rows);
 }

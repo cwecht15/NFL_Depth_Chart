@@ -1,5 +1,6 @@
-# Never commit a real auth config or service-account key.
-docs/auth.config.json
+# Never commit service-account keys. The OAuth Web client ID in
+# docs/auth.config.json IS committed: it's a public identifier by design,
+# and access is gated by the allowlist + server-side Session check.
 *.key.json
 fp-data-*.json
 

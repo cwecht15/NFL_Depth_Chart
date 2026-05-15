@@ -16,8 +16,10 @@ editors the service-account key:
 2. **GitHub Pages site** (this repo) — a static browser editor served at
    <https://cwecht15.github.io/NFL_Depth_Chart/>. A scheduled GitHub
    Action refreshes the snapshot every 10 minutes; edits live in
-   `localStorage`. Optionally syncs back to the sheet through an Apps
-   Script web app.
+   `localStorage`. Syncs back to the sheet through an Apps Script web app
+   that enforces **mandatory Google sign-in**, **per-team edit locks**, and
+   appends every change to an `AuditLog` tab so multiple editors can work
+   the same workbook without stepping on each other.
 
 Both front-ends read the same JSON-key schema (row-4 cell notes on the
 `DepthCharts` tab) and target the same set of writable manual columns. Only
@@ -268,13 +270,44 @@ override.
 
 | Path | Trigger | Where credentials live | Safety rails |
 | ---- | ------- | ---------------------- | ------------ |
-| Apps Script web app (`pages-site/apps_script/sync.gs`) | "Sync to sheet" button in the browser → POST to the deployer's web-app URL stored in `localStorage` | None in the browser; the script runs as the Google account that deployed it | Dry-run preview before commit; live tab gated by `allow_prod`; only writes JSON keys in `MANUAL_KEYS`; skips columns whose row-4 cell has a `formulaValue`; cell-level diff (no redundant writes); new rows append below `last_data_row` |
-| CLI writer (`pages-site/tools/sync_to_sheet.py`) | Browser → "Download sync JSON" → `python tools/sync_to_sheet.py sync_export.json [--commit]` | `FP_DATA_KEY_PATH` on the operator's machine, with writable scopes | Same diff/append/manual-key/formula-skip logic; `--commit` required to write; live tab gated by `--allow-prod` |
+| Apps Script web app (`pages-site/apps_script/sync.gs`) | "Sync to sheet" button in the browser → POST to the deployer's web-app URL stored in `localStorage` | None in the browser; the script runs as the Google account that deployed it | Dry-run preview before commit; live tab gated by `allow_prod`; only writes JSON keys in `MANUAL_KEYS`; skips columns whose row-4 cell has a `formulaValue`; cell-level diff (no redundant writes); new rows append below `last_data_row`; refuses sync unless caller holds a `Locks` row for every team in the diff (FA exempt); each change recorded to `AuditLog` with `Session.getActiveUser().getEmail()` as the verified `actor_email` |
+| CLI writer (`pages-site/tools/sync_to_sheet.py`) | Browser → "Download sync JSON" → `python tools/sync_to_sheet.py sync_export.json --commit --allow-bypass-locks` | `FP_DATA_KEY_PATH` on the operator's machine, with writable scopes | Same diff/append/manual-key/formula-skip logic; `--commit` requires both `--allow-bypass-locks` (because it skips the team-lock check) and (for the live tab) `--allow-prod`; every change is still appended to `AuditLog` as `cli_bypass` / `cli_bypass_append` so out-of-band writes are traceable |
 
 Both paths produce the same diff semantics so they're swappable. The
 browser path is the daily driver; the CLI is a fallback when the Apps
 Script deployment isn't available or when an operator wants to inspect a
 larger dry-run.
+
+## Multi-user safeguards
+
+Two sidecar tabs persist shared state on the same workbook:
+
+- **`Locks`** — one row per actively-edited team. Columns:
+  `team | owner_email | acquired_at | last_heartbeat_at`. FA is never
+  locked. Locks expire after **30 min** of no heartbeat
+  (`LOCK_TTL_SECONDS` in `sync.gs`); past the TTL a peer can take the
+  lock and the takeover is recorded as `lock_stolen` in `AuditLog`.
+- **`AuditLog`** — append-only history. Columns:
+  `ts | actor_email | action | team | sheet_row | column | before | after | details`.
+  Actions: `edit`, `append`, `lock_acquired`, `lock_released`,
+  `lock_stolen`, `lock_acquired_after_steal`, `force_release`, and
+  `cli_bypass` / `cli_bypass_append`. The browser-sent
+  `payload.editor` is informational only — `actor_email` always comes
+  from `Session.getActiveUser().getEmail()` on the server.
+
+The browser side:
+
+- Polls `?action=listLocks` every 30 s and renders other users' holds
+  inline in the team dropdown (`DAL  🔒 alice@example.com`, disabled).
+- Sends `heartbeatLock` every 2 min while a lock is held.
+- Acquires on team-select change (and via an explicit "Lock team" button
+  if you want to lock the team you're already viewing) and releases on
+  the "Release lock" button or sign-out.
+- Blocks edits in `recordEdit()` / `onAddPlayer()` / `onAddCustomPlayer()`
+  unless the user holds the lock for `row.team` (or the row is FA).
+- Shows a stale-snapshot banner if `snapshot.json.generated_at` is older
+  than 20 min and warns on `beforeunload` if you have unsynced edits with
+  a lock still held.
 
 ---
 

@@ -887,3 +887,44 @@ select { min-width: 100px; }
   0%, 100% { background: transparent; }
   35% { background: rgba(240, 173, 78, 0.20); }
 }
+
+/* --- Multi-user lock UI -------------------------------------------------- */
+.control--lock {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.control--lock .btn {
+  min-width: 100px;
+}
+.locks-panel {
+  margin: 8px 0 14px;
+  font-size: 0.9rem;
+}
+.locks-panel summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+  color: var(--muted, #888);
+}
+.locks-list {
+  list-style: none;
+  padding: 6px 12px;
+  margin: 4px 0 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+}
+.locks-list li {
+  padding: 4px 0;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
+}
+.locks-list li:last-child { border-bottom: none; }
+.stale-banner {
+  background: rgba(240, 173, 78, 0.16);
+  border: 1px solid rgba(240, 173, 78, 0.45);
+  color: #f0ad4e;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin: 0 0 12px;
+  font-size: 0.9rem;
+}

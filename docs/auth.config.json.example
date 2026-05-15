@@ -1,7 +1,8 @@
 {
   "_doc": [
     "Copy this file to docs/auth.config.json and fill in your Google OAuth Client ID and the editor allowlist.",
-    "If docs/auth.config.json is absent at runtime, the app loads with no auth gate (dev mode)."
+    "Sign-in is MANDATORY in multi-user mode. If docs/auth.config.json is missing or has no client_id, the editor refuses to start.",
+    "The allowlist also drives the server-side EDITOR_ALLOWLIST constant in apps_script/sync.gs — keep them in sync."
   ],
   "client_id": "YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com",
   "allowlist": [

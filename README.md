@@ -72,7 +72,7 @@ gh workflow run "Pull DepthChart Snapshot" -R cwecht15/NFL_Depth_Chart
 The workflow commits `docs/data/snapshot.json`. Pages redeploys within a
 minute. The cron then refreshes every 10 minutes.
 
-### 4. (Optional) Turn on Google sign-in
+### 4. Turn on Google sign-in (mandatory in multi-user mode)
 
 1. GCP Console → **Credentials** → **Create credentials** → **OAuth Client ID**
    → Web application.
@@ -87,8 +87,48 @@ minute. The cron then refreshes every 10 minutes.
    git push
    ```
 
-Without `auth.config.json`, the site loads with no sign-in gate (anyone
-with the URL sees the editor UI — but cannot write to the sheet anyway).
+Without `auth.config.json` (or with an empty `client_id`), the editor
+refuses to start — every edit must be attributable. Keep the JSON
+`allowlist` and the `EDITOR_ALLOWLIST` array in `apps_script/sync.gs`
+in sync; both are enforced.
+
+### 5. Multi-user safeguards — Locks + AuditLog tabs
+
+The Apps Script web app now persists two sidecar tabs on the same
+workbook:
+
+- **`Locks`** — one row per actively-edited team (FA never locks). Columns:
+  `team | owner_email | acquired_at | last_heartbeat_at`. Rows are created /
+  updated / deleted by the `acquireLock`, `heartbeatLock`, and `releaseLock`
+  endpoints. Rows are also force-cleared automatically when a lock has been
+  idle (no heartbeat) for **30 minutes** (`LOCK_TTL_SECONDS` in `sync.gs`).
+- **`AuditLog`** — append-only history of edits and lock events. Columns:
+  `ts | actor_email | action | team | sheet_row | column | before | after | details`.
+  The `actor_email` is **always** `Session.getActiveUser().getEmail()` — the
+  browser cannot spoof it. Actions: `edit`, `append`, `lock_acquired`,
+  `lock_released`, `lock_stolen`, `lock_acquired_after_steal`, `force_release`,
+  and `cli_bypass` / `cli_bypass_append` from `tools/sync_to_sheet.py`.
+
+Both tabs are auto-created on first use (you don't need to seed them).
+You can hand-edit `Locks` to clear a stuck row — the Apps Script reads it
+fresh on every request.
+
+**Behaviour at a glance.**
+- Each user can hold at most one team lock at a time. Switching teams in
+  the dropdown prompts to release the current lock first.
+- Other editors see locked teams in their team dropdown as
+  `DAL  🔒 alice@example.com` (disabled).
+- Free agents (`team === "FA"`) are never locked — anyone can edit FA
+  rows. Edits are still audit-logged.
+- A heartbeat fires from the browser every 2 minutes; if a tab/laptop
+  is left idle for 30 minutes the lock can be force-taken by a peer (a
+  `lock_stolen` row appears in `AuditLog`).
+- `LOCK_ADMIN_ALLOWLIST` in `sync.gs` enables a `forceReleaseLock` action
+  for clearing a stuck lock without waiting for the TTL.
+- The CLI writer (`tools/sync_to_sheet.py`) bypasses the lock check by
+  design — it now requires `--allow-bypass-locks` for any `--commit` and
+  writes `cli_bypass` rows to `AuditLog` so out-of-band writes are still
+  attributable.
 
 ---
 
@@ -123,19 +163,22 @@ flow:
    # Dry-run (default) — reads the target tab and shows what WOULD change.
    python tools/sync_to_sheet.py sync_export.json
 
-   # Actually write to "Copy of DepthCharts":
-   python tools/sync_to_sheet.py sync_export.json --commit
+   # Actually write to "Copy of DepthCharts" (bypasses team locks; logged):
+   python tools/sync_to_sheet.py sync_export.json --commit --allow-bypass-locks
    ```
 
    The default target is **`Copy of DepthCharts`**. The script refuses to
    touch the live `DepthCharts` tab unless you pass `--allow-prod` *and*
-   `--commit`.
+   `--commit`. Any `--commit` requires `--allow-bypass-locks` because the
+   CLI cannot honor the browser-side lock model; each cell change is
+   recorded to the `AuditLog` tab so it's still traceable.
 
    Other useful flags:
    ```bash
-   --tab "My Test Tab"   # different target tab
-   --preview-rows 25     # show more sample diffs in dry-run output
+   --tab "My Test Tab"          # different target tab
+   --preview-rows 25            # show more sample diffs in dry-run output
    --key path/to/key.json
+   --actor you@example.com      # AuditLog actor_email override
    ```
 
 **Safety rails baked in:**
