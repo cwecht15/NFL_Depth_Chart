@@ -1951,6 +1951,17 @@ async function _syncCommit() {
       });
       return;
     }
+    // Sync succeeded — the sheet is now authoritative for the rows we
+    // just wrote. Clear the local edit log so the row no longer shows
+    // as "edited" and so a subsequent snapshot refresh doesn't re-apply
+    // the same edits on top of the fresh data.
+    state.edits = [];
+    state.editedRowKeys.clear();
+    persistEdits();
+    updateEditCount();
+    // Pull fresh data so newly-appended rows pick up their real sheet
+    // row numbers (the local copies had virtual ids ≥ 100000).
+    refreshSnapshot().catch(() => {});
     showSyncModal({ phase: "done", result });
   } catch (err) {
     showSyncModal({ phase: "error", message: String(err.message || err) });
