@@ -99,6 +99,11 @@ const state = {
   allLocks: [],           // last polled list of all locks
   locksFetchedAt: 0,      // ms timestamp
   ttlSeconds: 0,          // server-reported lock TTL (filled by listLocks)
+
+  // Google ID token (JWT) from the GIS callback. Apps Script verifies this
+  // via tokeninfo to identify the caller — Session.getActiveUser().getEmail()
+  // returns "" for personal Gmail callers of an "Execute as: Me" web app.
+  idToken: null,
 };
 
 // Per-user localStorage key derivation. Until the user signs in, no per-user
@@ -664,7 +669,8 @@ async function refreshLocks() {
   const url = getSyncUrl();
   if (!url) return;  // Settings not configured yet; nothing to do.
   try {
-    const resp = await fetch(url + "?action=listLocks", { redirect: "follow" });
+    const qs = "?action=listLocks&id_token=" + encodeURIComponent(state.idToken || "");
+    const resp = await fetch(url + qs, { redirect: "follow" });
     if (!resp.ok) return;
     const body = await resp.json();
     if (!body || !body.ok) return;
@@ -1837,12 +1843,16 @@ function _buildSyncPayload(extra) {
 async function _postToSync(payload) {
   const url = getSyncUrl();
   if (!url) throw new Error("No Apps Script URL configured. Open Settings (⚙) and paste it.");
+  // Stamp every request with the Google ID token so Apps Script can verify
+  // identity via tokeninfo. Session.getActiveUser() doesn't work for
+  // personal Gmail callers, so this is the load-bearing identity path.
+  const body = Object.assign({}, payload, { id_token: state.idToken || "" });
   // text/plain is a "simple" request — no CORS preflight. The Apps Script
   // reads e.postData.contents either way.
   const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
     redirect: "follow",
   });
   if (!r.ok) {
@@ -1944,8 +1954,8 @@ function formatSyncError(resp) {
     if (others)  parts.push("teams locked by others: " + others);
     return "Sync refused — " + (parts.join("; ") || "you don't hold the right locks.");
   }
-  if (resp.error === "sign_in_required") return "The server didn't see a Google identity. Sign out and back in.";
-  if (resp.error === "not_authorized")   return "Your account isn't on the Apps Script editor allowlist.";
+  if (resp.error === "sign_in_required") return "Sign-in token expired or missing. Sign out and back in.";
+  if (resp.error === "not_authorized")   return "Your account (" + (resp.email || "unknown") + ") isn't on the Apps Script editor allowlist.";
   return "Server refused: " + (resp.error || "unknown");
 }
 
@@ -2136,6 +2146,7 @@ async function onGoogleCredential(resp) {
     return;
   }
   state.authedEmail = email;
+  state.idToken = resp.credential;
   document.getElementById("auth-gate").style.display = "none";
   setBadge("auth-status", email, "good");
   document.getElementById("signout-btn").style.display = "inline-flex";

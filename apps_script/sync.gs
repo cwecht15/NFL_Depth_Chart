@@ -74,6 +74,13 @@ const LOCK_TTL_SECONDS = 30 * 60;
 // Free-agent placeholder; never locked.
 const FA_TEAM = "FA";
 
+// OAuth Web Client ID (same as docs/auth.config.json). Used to verify the
+// `aud` claim on Google ID tokens passed up from the browser. This is the
+// load-bearing identity check for personal Gmail callers: Apps Script's
+// Session.getActiveUser().getEmail() returns "" for them when the web app
+// is deployed "Execute as: Me", so we fall back to JWT verification.
+const EXPECTED_CLIENT_ID = "504863493135-n5jrls1m670m80iif39o253aa3bkttqs.apps.googleusercontent.com";
+
 // === HTTP entry points ====================================================
 
 function doGet(e) {
@@ -81,7 +88,18 @@ function doGet(e) {
   // browser poll lock state without paying the full handler cost.
   const action = (e && e.parameter && e.parameter.action || "").toLowerCase();
   if (action === "listlocks") {
+    // Auth still required so we don't leak the editor email list publicly.
+    const actorEmail = _getCallerEmail(null, e);
+    if (!actorEmail) return _json({ ok: false, error: "sign_in_required" }, 401);
+    if (EDITOR_ALLOWLIST.length > 0 && !EDITOR_ALLOWLIST.includes(actorEmail)) {
+      return _json({ ok: false, error: "not_authorized", email: actorEmail }, 403);
+    }
     return _json(handleListLocks());
+  }
+  if (action === "whoami") {
+    // Diagnostic: returns what we think the caller's identity is plus where
+    // we got it from. Helpful when "not_authorized" surprises someone.
+    return _json(_whoAmI(null, e));
   }
   return _json({
     ok: true,
@@ -98,17 +116,18 @@ function doPost(e) {
     // so the body is still raw JSON.
     const payload = JSON.parse(e.postData.contents || "{}");
 
-    // Verified identity. Body fields like `payload.editor` are informational
-    // only — anything that has side effects uses this.
-    const actorEmail = Session.getActiveUser().getEmail() || "";
+    // Verified identity. Tries Session.getActiveUser().getEmail() first;
+    // falls back to verifying the Google ID token (`payload.id_token`)
+    // through Google's tokeninfo endpoint, which is the only reliable way
+    // to identify non-Workspace callers of a personal Apps Script web app.
+    // Body fields like `payload.editor` are informational only.
+    const actorEmail = _getCallerEmail(payload, e);
 
-    if (EDITOR_ALLOWLIST.length > 0) {
-      if (!actorEmail || !EDITOR_ALLOWLIST.includes(actorEmail)) {
-        return _json({ ok: false, error: "not_authorized", email: actorEmail || null }, 403);
-      }
-    }
     if (!actorEmail) {
       return _json({ ok: false, error: "sign_in_required" }, 401);
+    }
+    if (EDITOR_ALLOWLIST.length > 0 && !EDITOR_ALLOWLIST.includes(actorEmail)) {
+      return _json({ ok: false, error: "not_authorized", email: actorEmail }, 403);
     }
 
     const action = (payload.action || "sync").toLowerCase();
@@ -809,4 +828,64 @@ function _writeAuditRows(ss, rows) {
   const sheet = _ensureAuditSheet(ss);
   const startRow = sheet.getLastRow() + 1;
   sheet.getRange(startRow, 1, rows.length, AUDIT_HEADERS.length).setValues(rows);
+}
+
+// === Identity verification ===============================================
+//
+// Personal Gmail web apps deployed as "Execute as: Me" don't surface the
+// caller's email through Session.getActiveUser() (Google privacy quirk).
+// So we additionally accept a Google ID token (JWT) in the request and
+// verify it against Google's tokeninfo endpoint. That endpoint validates
+// the signature and gives back the verified claims; we then check `aud`
+// matches our OAuth client and `email_verified` is true.
+
+function _getCallerEmail(payload, requestEvent) {
+  const sessionEmail = (function () {
+    try { return Session.getActiveUser().getEmail() || ""; }
+    catch (e) { return ""; }
+  })();
+  if (sessionEmail) return sessionEmail.toLowerCase();
+  const token = (payload && payload.id_token)
+    || (requestEvent && requestEvent.parameter && requestEvent.parameter.id_token)
+    || "";
+  if (!token) return "";
+  const verified = _verifyIdToken(token);
+  return verified ? verified.toLowerCase() : "";
+}
+
+function _verifyIdToken(idToken) {
+  try {
+    const resp = UrlFetchApp.fetch(
+      "https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(idToken),
+      { muteHttpExceptions: true }
+    );
+    if (resp.getResponseCode() !== 200) return null;
+    const data = JSON.parse(resp.getContentText());
+    if (!data || data.error) return null;
+    if (data.aud !== EXPECTED_CLIENT_ID) return null;
+    // tokeninfo returns email_verified as a string "true" / "false".
+    if (data.email_verified !== "true" && data.email_verified !== true) return null;
+    return data.email || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function _whoAmI(payload, requestEvent) {
+  const session = (function () {
+    try { return Session.getActiveUser().getEmail() || ""; }
+    catch (e) { return ""; }
+  })();
+  const token = (payload && payload.id_token)
+    || (requestEvent && requestEvent.parameter && requestEvent.parameter.id_token)
+    || "";
+  const verified = token ? _verifyIdToken(token) : null;
+  return {
+    ok: true,
+    session_email: session,
+    has_id_token: !!token,
+    verified_email: verified || null,
+    allowlisted: !!(verified && EDITOR_ALLOWLIST.indexOf(verified.toLowerCase()) >= 0)
+      || !!(session && EDITOR_ALLOWLIST.indexOf(session.toLowerCase()) >= 0),
+  };
 }
