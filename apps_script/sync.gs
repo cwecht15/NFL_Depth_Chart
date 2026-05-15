@@ -18,8 +18,10 @@
 // === Settings =============================================================
 
 const SPREADSHEET_ID    = "1XHXiR__p7h2JVLKNkS-F9aiKZjhar78YubQklW_baQA";
-const DEFAULT_TARGET_TAB = "Copy of DepthCharts";
-const PROD_TAB          = "DepthCharts";
+// Live tab is the daily driver. Editors land here by default; the older
+// "Copy of DepthCharts" staging tab is no longer the default but can be
+// targeted explicitly via Settings → Target tab if you want a sandbox.
+const DEFAULT_TARGET_TAB = "DepthCharts";
 
 // Row 4 of the target tab carries cell notes that name the JSON key for
 // each column. Row 5 is the first data row.
@@ -165,15 +167,7 @@ function doPost(e) {
 function handleSync(payload, actorEmail) {
   const targetTab = payload.target_tab || DEFAULT_TARGET_TAB;
   const commit    = !!payload.commit;
-  const allowProd = !!payload.allow_prod;
   actorEmail = actorEmail || Session.getActiveUser().getEmail() || "";
-
-  if (targetTab === PROD_TAB && !allowProd) {
-    throw new Error(
-      "Refusing to write to " + PROD_TAB +
-      "; resend with allow_prod=true to override."
-    );
-  }
 
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   const sheet = ss.getSheetByName(targetTab);

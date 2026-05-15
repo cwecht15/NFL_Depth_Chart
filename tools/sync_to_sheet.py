@@ -2,8 +2,8 @@
 
 Reads ``sync_export.json`` (downloaded from the web app) and writes the
 manual-column cells into a target tab in the Google Sheet. **Defaults to
-dry-run**; pass ``--commit`` to actually write. **Refuses to touch the live
-``DepthCharts`` tab** unless ``--allow-prod`` is set.
+dry-run**; pass ``--commit`` (and ``--allow-bypass-locks``) to actually
+write. The default target tab is the live ``DepthCharts`` tab.
 
 The web app cannot hold the service-account key, so this script runs locally
 with your fp-data credentials.
@@ -13,14 +13,11 @@ Usage::
     # Preview what would change (no writes):
     python tools/sync_to_sheet.py sync_export.json
 
-    # Actually write to "Copy of DepthCharts":
-    python tools/sync_to_sheet.py sync_export.json --commit
+    # Actually write to the live DepthCharts:
+    python tools/sync_to_sheet.py sync_export.json --commit --allow-bypass-locks
 
-    # Pick a different target tab:
-    python tools/sync_to_sheet.py sync_export.json --tab "My Test Tab" --commit
-
-    # Write to the live DepthCharts (deliberately gated):
-    python tools/sync_to_sheet.py sync_export.json --commit --allow-prod
+    # Pick a different target tab (sandbox):
+    python tools/sync_to_sheet.py sync_export.json --tab "Copy of DepthCharts" --commit --allow-bypass-locks
 """
 from __future__ import annotations
 
@@ -35,8 +32,9 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
 SPREADSHEET_ID = "1XHXiR__p7h2JVLKNkS-F9aiKZjhar78YubQklW_baQA"
-DEFAULT_TARGET_TAB = "Copy of DepthCharts"
-PROD_TAB = "DepthCharts"
+# Live tab is the default everywhere now. The legacy "Copy of DepthCharts"
+# sandbox can still be targeted explicitly via --tab.
+DEFAULT_TARGET_TAB = "DepthCharts"
 
 # The CLI bypasses the lock system the Apps Script web app enforces. Every
 # commit appends a row per change to AUDIT_TAB so the team-locks story stays
@@ -90,11 +88,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Sync web-app edits into a sheet tab.")
     p.add_argument("export_file", help="Path to sync_export.json downloaded from the web app.")
     p.add_argument("--tab", default=DEFAULT_TARGET_TAB,
-                   help=f"Target tab name (default: {DEFAULT_TARGET_TAB!r}).")
+                   help=f"Target tab name (default: {DEFAULT_TARGET_TAB!r}, the live tab).")
     p.add_argument("--commit", action="store_true",
                    help="Actually write the changes. Without this, runs as a dry-run.")
-    p.add_argument("--allow-prod", action="store_true",
-                   help="Allow writing to the live DepthCharts tab. Default: refused.")
     p.add_argument("--allow-bypass-locks", action="store_true",
                    help="Required for any --commit: acknowledges the CLI bypasses the "
                         "team-lock system the web app enforces. Every change is still "
@@ -374,12 +370,6 @@ def apply_appends(
 
 def main() -> int:
     args = parse_args()
-
-    if args.tab == PROD_TAB and not args.allow_prod:
-        sys.exit(
-            f"Refusing to write to {PROD_TAB!r}. Re-run with --allow-prod "
-            "if you really mean it (and ideally with --commit only on a test tab first)."
-        )
 
     if args.commit and not args.allow_bypass_locks:
         sys.exit(

@@ -56,7 +56,8 @@ const LS_SYNC_URL        = "depthchart_sync_url_v1";
 const LS_TARGET_TAB      = "depthchart_target_tab_v1";
 const LS_TEAM_BASE       = "depthchart_team";
 
-const DEFAULT_TARGET_TAB = "Copy of DepthCharts";
+const DEFAULT_TARGET_TAB = "DepthCharts";
+const LEGACY_TARGET_TAB  = "Copy of DepthCharts";  // migrate away from on load
 
 // Stale-snapshot warning threshold (minutes). Snapshot.json is refreshed every
 // ~10 min by the GH Action; flag anything noticeably older than that.
@@ -217,6 +218,14 @@ function migrateUnNamespacedLS() {
       localStorage.setItem(newKey, legacy);
     } catch {}
   }
+  // Older builds defaulted Settings → Target tab to "Copy of DepthCharts".
+  // The default is now live "DepthCharts"; clear the legacy override so
+  // existing browsers don't keep writing to the sandbox tab.
+  try {
+    if ((localStorage.getItem(LS_TARGET_TAB) || "").trim() === LEGACY_TARGET_TAB) {
+      localStorage.removeItem(LS_TARGET_TAB);
+    }
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------
