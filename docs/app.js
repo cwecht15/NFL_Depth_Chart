@@ -720,13 +720,27 @@ async function acquireLock(team) {
     const resp = await _postToSync({ action: "acquireLock", team });
     if (resp && resp.ok && resp.lock) {
       state.myLock = { ...resp.lock };
+      // Optimistic UI update: reflect the new lock immediately instead of
+      // waiting for the next listLocks poll. The poll will reconcile any
+      // drift within 30 s, but the user shouldn't see a stale toolbar.
+      state.allLocks = state.allLocks.filter((l) => l.team !== team);
+      state.allLocks.push({
+        team: state.myLock.team,
+        owner_email: state.myLock.owner_email,
+        acquired_at: state.myLock.acquired_at,
+        last_heartbeat_at: state.myLock.last_heartbeat_at,
+        idle_seconds: 0,
+        expired: false,
+      });
+      syncTeamPickerLockUI();
+      renderLocksPanel();
+      renderTeamView();
       if (resp.stolen_from) {
         toast(`Took lock on ${team} (previous owner ${resp.stolen_from} was idle).`, 5000);
       } else {
         toast(`Lock acquired: ${team}.`, 3000);
       }
-      // Don't await refreshLocks — it doesn't gate our success and adds
-      // another roundtrip. The poll will catch up within 30 s.
+      // Background reconciliation; don't await.
       refreshLocks().catch(() => {});
       return state.myLock;
     }
@@ -753,9 +767,16 @@ async function releaseLock(team) {
   try {
     const resp = await _postToSync({ action: "releaseLock", team });
     if (resp && resp.ok) {
+      // Optimistic UI update — flip the toolbar/panel immediately so the
+      // user doesn't see "Switch lock to X / 🔓 X / DAL editing" stay on
+      // screen for a few seconds while the next poll runs.
       if (state.myLock && state.myLock.team === team) state.myLock = null;
+      state.allLocks = state.allLocks.filter((l) => l.team !== team);
+      syncTeamPickerLockUI();
+      renderLocksPanel();
+      renderTeamView();
       toast(`Released lock on ${team}.`, 3000);
-      await refreshLocks();
+      refreshLocks().catch(() => {});
       return true;
     }
     toast("Release failed: " + (resp && resp.error || "unknown"), 5000);
