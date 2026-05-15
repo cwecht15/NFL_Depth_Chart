@@ -25,6 +25,16 @@ const MANUAL_KEYS = new Set([
 
 const BOOL_KEYS = new Set(["isEdge", "freeAgentSigning", "isTradeAcquisition"]);
 
+const STATUS_DESCRIPTION_OPTIONS = [
+  "Active",
+  "Inactive",
+  "Inactive/3rd QB",
+  "IR",
+  "SUS",
+  "PUP",
+  "PS",
+];
+
 const DISPLAY_COLUMNS = [
   "depthOrder",
   "depthPosition",
@@ -543,6 +553,9 @@ function renderEditableCell(r, key) {
   }
   if (key === "team") {
     return renderSelectCell(r, key, val, teamList());
+  }
+  if (key === "statusDescription") {
+    return renderSelectCell(r, key, val, STATUS_DESCRIPTION_OPTIONS);
   }
 
   const input = document.createElement("input");
