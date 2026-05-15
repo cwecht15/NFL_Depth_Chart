@@ -373,13 +373,17 @@ function rowsForTeam(team) {
 }
 
 function categoriesForTeam(team) {
-  const cats = new Set();
+  // Always render the six canonical category tabs in canonical order so
+  // navigation is consistent across teams (e.g., Practice Squad has a
+  // stable home for every team even when it's currently empty). Any
+  // non-standard categories present in the data are appended after.
+  const present = new Set();
   for (const r of rowsForTeam(team)) {
     const c = (r.depthPositionCategory || "").trim() || "OFF";
-    cats.add(c);
+    present.add(c);
   }
-  return CATEGORY_ORDER.filter(c => cats.has(c)).concat(
-    [...cats].filter(c => !CATEGORY_ORDER.includes(c))
+  return CATEGORY_ORDER.concat(
+    [...present].filter(c => !CATEGORY_ORDER.includes(c))
   );
 }
 
@@ -416,6 +420,13 @@ function renderTeamView() {
   }
 
   const teamRows = rowsForTeam(team).filter(r => (r.depthPositionCategory || "OFF") === cat);
+  if (teamRows.length === 0) {
+    const catLabel = CATEGORY_LABELS[cat] || cat;
+    content.innerHTML =
+      `<p class="muted">No ${escapeHTML(catLabel)} players for ${escapeHTML(team)}.` +
+      ` Use the "Add a player" form below to add one, or move a player here by editing their <code>depthPositionCategory</code>.</p>`;
+    return;
+  }
   // Group by `position` (e.g., LWR/SWR/RWR all collapse to WR). Falls back
   // to `depthPosition` for rows where `position` hasn't been filled in.
   const groups = new Map();
