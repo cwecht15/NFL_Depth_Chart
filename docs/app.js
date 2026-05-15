@@ -38,6 +38,7 @@ const STATUS_DESCRIPTION_OPTIONS = [
 const DISPLAY_COLUMNS = [
   "depthOrder",
   "depthPosition",
+  "depthPositionCategory",
   "displayName",
   "firstName",
   "lastName",
