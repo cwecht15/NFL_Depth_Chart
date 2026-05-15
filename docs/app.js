@@ -652,6 +652,15 @@ function updateEditCount() {
   el.textContent = `${n} edit${n === 1 ? "" : "s"}`;
   el.classList.toggle("badge--muted", n === 0);
   el.classList.toggle("badge--accent", n > 0);
+  // Reflect the same state on the Sync button so the user can see at a
+  // glance whether there's anything to send.
+  const syncBtn = document.getElementById("sync-to-sheet-btn");
+  if (syncBtn) {
+    syncBtn.disabled = (n === 0);
+    syncBtn.title = (n === 0)
+      ? "No pending edits to sync."
+      : "Send edits to the configured Apps Script web app";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1902,6 +1911,10 @@ async function refreshSnapshot() {
 }
 
 async function onSyncToSheet() {
+  if (state.edits.length === 0) {
+    toast("No pending edits to sync.", 3000);
+    return;
+  }
   if (!getSyncUrl()) {
     openSettings(true);
     setSettingsStatus("Paste your Apps Script URL first, then try Sync again.", "error");
