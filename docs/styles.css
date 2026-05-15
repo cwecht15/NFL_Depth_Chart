@@ -1,6 +1,11 @@
 /* Depth Chart Editor — visual language borrowed from NFL_Draft_Value_Chart */
 
 :root {
+  /* Tell the browser this is a dark UI so native form controls
+     (open <select> menus, scrollbars, etc.) render with dark theming
+     instead of the OS default white. Single biggest legibility win. */
+  color-scheme: dark;
+
   --bg-primary: #1a1a2e;
   --bg-secondary: #16213e;
   --bg-tertiary: #0f3460;
@@ -886,6 +891,22 @@ select { min-width: 100px; }
 @keyframes flash-highlight {
   0%, 100% { background: transparent; }
   35% { background: rgba(240, 173, 78, 0.20); }
+}
+
+/* --- Native dropdown legibility ----------------------------------------- */
+/* The closed <select> already inherits .cell-input / control-row styling.
+   The OPEN dropdown list, however, is OS-rendered, so we set option colors
+   explicitly so it stays readable when color-scheme alone isn't enough
+   (older Chromium on Windows can still ignore it for <option>). */
+select option,
+select optgroup {
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+}
+select option:checked,
+select option:hover {
+  background-color: var(--accent);
+  color: var(--text-heading);
 }
 
 /* --- Multi-user lock UI -------------------------------------------------- */
