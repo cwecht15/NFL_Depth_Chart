@@ -871,6 +871,34 @@ function _verifyIdToken(idToken) {
   }
 }
 
+/**
+ * One-time setup helper. Run this once from the Apps Script editor to grant
+ * the script the `UrlFetchApp` (external_request) OAuth scope it needs to
+ * verify Google ID tokens via tokeninfo. Without this, web-app POST handlers
+ * fall back to `sign_in_required` for personal Gmail callers.
+ *
+ * How to use:
+ *   1. In the Apps Script editor, select `authorizeScopes` from the function
+ *      dropdown next to "Debug".
+ *   2. Click "Run".
+ *   3. Approve the OAuth consent dialog ("Connect to an external service").
+ *   4. The Logger output should show something like
+ *      `{"aud":"504...","email":null, "error":"Invalid Value"}` — the call
+ *      fails because we passed a dummy token, BUT the scope is now granted
+ *      for all future legitimate calls from doPost/doGet.
+ *   5. No redeploy needed — web-app deployments use the deployer's
+ *      already-granted scopes the next time a request comes in.
+ */
+function authorizeScopes() {
+  const resp = UrlFetchApp.fetch(
+    "https://oauth2.googleapis.com/tokeninfo?id_token=dummy",
+    { muteHttpExceptions: true }
+  );
+  Logger.log("response code: %s", resp.getResponseCode());
+  Logger.log("response body: %s", resp.getContentText().slice(0, 200));
+  Logger.log("Scope is now authorized. doPost should resolve identity correctly.");
+}
+
 function _whoAmI(payload, requestEvent) {
   const session = (function () {
     try { return Session.getActiveUser().getEmail() || ""; }
