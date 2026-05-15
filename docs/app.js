@@ -605,9 +605,9 @@ function lockGateMessage(row) {
   if (!getSyncUrl()) return "Open Settings (⚙) and paste the Apps Script URL before editing.";
   const t = (row && row.team || "").trim().toUpperCase() || "this team";
   if (state.myLock && state.myLock.team !== t) {
-    return "You hold the lock for " + state.myLock.team + ", not " + t + ".";
+    return "You hold the lock for " + state.myLock.team + ". Release it and click \"Lock " + t + "\" to edit.";
   }
-  return "Acquire the lock for " + t + " before editing.";
+  return "Click \"Lock " + t + "\" to start editing.";
 }
 
 function persistEdits() {
@@ -715,6 +715,7 @@ async function acquireLock(team) {
     toast("Sync URL not set. Open Settings (⚙) and configure it before editing.", 5000);
     return null;
   }
+  toast(`Locking ${team}…`, Infinity);
   try {
     const resp = await _postToSync({ action: "acquireLock", team });
     if (resp && resp.ok && resp.lock) {
@@ -724,7 +725,9 @@ async function acquireLock(team) {
       } else {
         toast(`Lock acquired: ${team}.`, 3000);
       }
-      await refreshLocks();
+      // Don't await refreshLocks — it doesn't gate our success and adds
+      // another roundtrip. The poll will catch up within 30 s.
+      refreshLocks().catch(() => {});
       return state.myLock;
     }
     if (resp && resp.error === "locked_by_other") {
@@ -732,7 +735,7 @@ async function acquireLock(team) {
     } else if (resp && resp.error === "already_holding_other") {
       toast(`Release ${resp.held_team} first.`, 5000);
     } else if (resp && resp.error === "fa_not_lockable") {
-      // Shouldn't happen — caller filters FA — but be defensive.
+      hideToast();
       return null;
     } else {
       toast("Could not acquire lock: " + (resp && resp.error || "unknown"), 5000);
@@ -786,53 +789,12 @@ async function acquireCurrentTeamLock() {
   syncTeamPickerLockUI();
 }
 
-async function onTeamSelectChange(e) {
+function onTeamSelectChange(e) {
+  // Switching teams is read-only navigation. No lock work happens here.
+  // Use the explicit "Lock team" button to acquire an edit lock; users
+  // can browse any team freely without taking a lock.
   const desired = (e.target.value || "").trim().toUpperCase();
-  const prev = (state.currentTeam || "").trim().toUpperCase();
-  if (!desired || desired === prev) return;
-
-  // No Apps Script URL configured → lock infra unavailable; allow free
-  // navigation so the editor remains browsable, edits are still blocked by
-  // canEditRow until Settings is filled in.
-  if (!getSyncUrl()) {
-    commitTeamSwitch(desired);
-    return;
-  }
-
-  // FA is unlocked: editors can drop into FA without releasing their team.
-  if (desired === FA_TEAM) {
-    commitTeamSwitch(desired);
-    return;
-  }
-
-  // Holding a different team? Must release first.
-  if (state.myLock && state.myLock.team !== desired) {
-    if (!confirm(`You currently hold ${state.myLock.team}. Release it and lock ${desired}?`)) {
-      // Snap back.
-      e.target.value = state.currentTeam;
-      return;
-    }
-    const released = await releaseLock(state.myLock.team);
-    if (!released) {
-      e.target.value = state.currentTeam;
-      return;
-    }
-  }
-
-  // Refresh locks so we know who (if anyone) owns the desired team right now.
-  await refreshLocks();
-  const held = state.allLocks.find((l) => l.team === desired && !l.expired);
-  if (held && held.owner_email !== state.authedEmail) {
-    toast(`${desired} is currently being edited by ${held.owner_email}.`, 6000);
-    e.target.value = state.currentTeam;
-    return;
-  }
-
-  const got = await acquireLock(desired);
-  if (!got) {
-    e.target.value = state.currentTeam;
-    return;
-  }
+  if (!desired || desired === (state.currentTeam || "").trim().toUpperCase()) return;
   commitTeamSwitch(desired);
 }
 
@@ -858,17 +820,15 @@ function syncTeamPickerLockUI() {
   for (const opt of sel.options) {
     const t = (opt.value || "").trim().toUpperCase();
     const l = byTeam.get(t);
+    // Switching teams is read-only navigation, so dropdown options are
+    // never disabled; the lock badge is purely informational.
+    opt.disabled = false;
     if (!l || t === FA_TEAM) {
       opt.textContent = opt.value;
-      opt.disabled = false;
-      continue;
-    }
-    if (l.owner_email === state.authedEmail) {
+    } else if (l.owner_email === state.authedEmail) {
       opt.textContent = opt.value + "  🔓 you";
-      opt.disabled = false;
     } else {
       opt.textContent = opt.value + "  🔒 " + l.owner_email;
-      opt.disabled = (t !== state.currentTeam);  // keep selection valid
     }
   }
   const releaseBtn = document.getElementById("release-lock-btn");
