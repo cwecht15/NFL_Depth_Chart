@@ -2084,12 +2084,21 @@ function setupAuthGate() {
       google.accounts.id.initialize({
         client_id: state.authConfig.client_id,
         callback: onGoogleCredential,
-        auto_select: false,
+        // auto_select: silent re-sign-in on repeat visits if the user has
+        // already approved this app and only one Google account is signed
+        // in to the browser. First visit still shows the One Tap UI below.
+        auto_select: true,
+        cancel_on_tap_outside: false,
       });
       google.accounts.id.renderButton(
         document.getElementById("google-signin"),
         { theme: "filled_black", size: "large", text: "signin_with" }
       );
+      // One Tap: a small "Continue as X" prompt in the top-right. After the
+      // first manual sign-in, returns instantly without a click (auto_select).
+      // If the prompt can't be shown (blocked, multiple accounts not chosen),
+      // the renderButton above remains as a fallback.
+      google.accounts.id.prompt();
     }
   }, 80);
 }
