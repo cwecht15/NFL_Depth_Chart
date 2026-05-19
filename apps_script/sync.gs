@@ -239,7 +239,87 @@ function handleSync(payload, actorEmail) {
   // payload (the sheet update may not have included team in the diff).
   _writeAuditRows(ss, _buildAuditEntries(updates, appends, rows, actorEmail, targetTab));
 
+  // Mirror the DepthCharts slice into Roster Info on the consumer workbook.
+  // Skips on no-op commits to avoid pointless writes. Failures are non-fatal
+  // — the editor's sync has already succeeded; we just surface the error.
+  if (cellsWritten > 0 || (appendInfo && appendInfo.numRows > 0)) {
+    try {
+      const exp = _exportRosterInfo(ss);
+      summary.roster_info_export = { ok: true, rows: exp.rows, cols: exp.cols, elapsed_ms: exp.elapsed_ms };
+    } catch (err) {
+      summary.roster_info_export = { ok: false, error: String(err && err.message || err) };
+    }
+  } else {
+    summary.roster_info_export = { ok: true, skipped: "no_changes" };
+  }
+
   return summary;
+}
+
+// === Roster Info export ===================================================
+//
+// `DepthCharts` is canonical; `Roster Info` on the consumer workbook is a
+// projection of six columns from it. Historically the consumer pulled via
+// IMPORTRANGE, which can cache for ~5 minutes (occasionally longer). Pushing
+// directly from this script after every commit drops end-to-end staleness
+// to the seconds it takes Apps Script to finish writing.
+//
+// Requirements:
+//   - The script owner (deployment "Execute as: Me") must have edit access
+//     to ROSTER_INFO_DEST_SPREADSHEET_ID.
+//   - DepthCharts column letters used below must stay stable. If those
+//     ever shift, swap to row-4 JSON-key lookup (the same mechanism the
+//     editor uses for writes) — see _readTargetTab for the pattern.
+
+const ROSTER_INFO_DEST_SPREADSHEET_ID = "1zry9ZCAOoevHN9-EnVpGt7YzHmq8MuUZA_AjXjJO250";
+const ROSTER_INFO_DEST_TAB            = "Roster Info";
+const ROSTER_INFO_SOURCE_TAB          = "DepthCharts";
+const ROSTER_INFO_START_ROW           = 5;
+const ROSTER_INFO_MAX_ROW             = 5000;
+// 1-based column indices in DepthCharts, in OUTPUT order. Matches the
+// retired copyDepthChartsColumns(): F, G, H, W, M, AA.
+const ROSTER_INFO_SOURCE_COLUMNS = [6, 7, 8, 23, 13, 27];
+
+function _exportRosterInfo(srcSs) {
+  const t0 = Date.now();
+
+  // Force any pending recalcs (depthOrder COUNTIFS, displayName ARRAYFORMULA,
+  // etc.) to settle before we read — otherwise the export can ship pre-recalc
+  // values right after a commit.
+  SpreadsheetApp.flush();
+
+  const src = srcSs.getSheetByName(ROSTER_INFO_SOURCE_TAB);
+  if (!src) throw new Error("Source tab not found: " + ROSTER_INFO_SOURCE_TAB);
+
+  const lastRow = src.getLastRow();
+  const endRow = Math.min(ROSTER_INFO_MAX_ROW, lastRow);
+  const numRows = endRow - ROSTER_INFO_START_ROW + 1;
+  if (numRows <= 0) return { rows: 0, cols: 0, elapsed_ms: Date.now() - t0 };
+
+  // Single read across the bounding column span, then permute in memory —
+  // cheaper than four separate getValues() calls and easier to extend.
+  const minCol = Math.min.apply(null, ROSTER_INFO_SOURCE_COLUMNS);
+  const maxCol = Math.max.apply(null, ROSTER_INFO_SOURCE_COLUMNS);
+  const width = maxCol - minCol + 1;
+  const grid = src.getRange(ROSTER_INFO_START_ROW, minCol, numRows, width).getValues();
+
+  const outWidth = ROSTER_INFO_SOURCE_COLUMNS.length;
+  const merged = new Array(numRows);
+  for (let r = 0; r < numRows; r++) {
+    const row = new Array(outWidth);
+    for (let c = 0; c < outWidth; c++) {
+      row[c] = grid[r][ROSTER_INFO_SOURCE_COLUMNS[c] - minCol];
+    }
+    merged[r] = row;
+  }
+
+  const destSs = SpreadsheetApp.openById(ROSTER_INFO_DEST_SPREADSHEET_ID);
+  let tgt = destSs.getSheetByName(ROSTER_INFO_DEST_TAB);
+  if (!tgt) tgt = destSs.insertSheet(ROSTER_INFO_DEST_TAB);
+  tgt.clearContents();
+  tgt.getRange(1, 1, merged.length, merged[0].length).setValues(merged);
+
+  return { rows: merged.length, cols: outWidth, elapsed_ms: Date.now() - t0 };
 }
 
 // === Helpers ==============================================================
