@@ -258,34 +258,54 @@ function handleSync(payload, actorEmail) {
 
 // === Roster Info export ===================================================
 //
-// `DepthCharts` is canonical; `Roster Info` on the consumer workbook is a
-// projection of six columns from it. Historically the consumer pulled via
-// IMPORTRANGE, which can cache for ~5 minutes (occasionally longer). Pushing
-// directly from this script after every commit drops end-to-end staleness
-// to the seconds it takes Apps Script to finish writing.
+// `DepthCharts` is canonical; `Roster_Info` on the consumer workbook is a
+// projection of six DepthCharts columns into the value cells of an otherwise
+// formula-rich tab:
+//
+//   Roster_Info column   | source (DepthCharts) | role
+//   ---------------------+----------------------+-----------------
+//   A  Name              | F  (col 6)           | value
+//   B  ELIAS ID          | G  (col 7)           | value
+//   C  GSIS ID           | H  (col 8)           | value
+//   D  TEAM              | W  (col 23)          | value
+//   E  POS               | M  (col 13)          | value
+//   F  (offense/ST rank) | —                    | FORMULA — leave alone
+//   G  Status            | AA (col 27)          | value
+//   H..N                 | —                    | FORMULAS — leave alone
+//
+// Rows 1–2 are headers and must not be touched. Data starts at row 3.
+//
+// Historically the consumer pulled via IMPORTRANGE, which can cache for ~5
+// minutes (occasionally longer). Pushing directly from this script after
+// every commit drops end-to-end staleness to the seconds Apps Script takes
+// to finish writing.
 //
 // Requirements:
 //   - The script owner (deployment "Execute as: Me") must have edit access
 //     to ROSTER_INFO_DEST_SPREADSHEET_ID.
-//   - DepthCharts column letters used below must stay stable. If those
-//     ever shift, swap to row-4 JSON-key lookup (the same mechanism the
-//     editor uses for writes) — see _readTargetTab for the pattern.
+//   - The Roster_Info tab must already exist with its header rows + formula
+//     columns intact. We refuse to auto-create it.
+//   - DepthCharts column letters in ROSTER_INFO_SOURCE_COLUMNS must stay
+//     stable. If they shift, swap to row-4 JSON-key lookup (same pattern as
+//     _readTargetTab) — leaving a TODO here is cheaper than guessing wrong.
 
 const ROSTER_INFO_DEST_SPREADSHEET_ID = "1zry9ZCAOoevHN9-EnVpGt7YzHmq8MuUZA_AjXjJO250";
 const ROSTER_INFO_DEST_TAB            = "Roster_Info";
+const ROSTER_INFO_DEST_START_ROW      = 3;
 const ROSTER_INFO_SOURCE_TAB          = "DepthCharts";
 const ROSTER_INFO_START_ROW           = 5;
 const ROSTER_INFO_MAX_ROW             = 5000;
-// 1-based column indices in DepthCharts, in OUTPUT order. Matches the
-// retired copyDepthChartsColumns(): F, G, H, W, M, AA.
-const ROSTER_INFO_SOURCE_COLUMNS = [6, 7, 8, 23, 13, 27];
+// 1-based DepthCharts column indices in OUTPUT order:
+//   A=F(6), B=G(7), C=H(8), D=W(23), E=M(13)   ← block AE
+//   G=AA(27)                                    ← block G
+const ROSTER_INFO_AE_SOURCE_COLUMNS = [6, 7, 8, 23, 13];
+const ROSTER_INFO_G_SOURCE_COLUMN   = 27;
 
 function _exportRosterInfo(srcSs) {
   const t0 = Date.now();
 
-  // Force any pending recalcs (depthOrder COUNTIFS, displayName ARRAYFORMULA,
-  // etc.) to settle before we read — otherwise the export can ship pre-recalc
-  // values right after a commit.
+  // Force pending recalcs (depthOrder COUNTIFS, displayName ARRAYFORMULA,
+  // etc.) to settle so we ship post-recalc values, not stale ones.
   SpreadsheetApp.flush();
 
   const src = srcSs.getSheetByName(ROSTER_INFO_SOURCE_TAB);
@@ -296,30 +316,61 @@ function _exportRosterInfo(srcSs) {
   const numRows = endRow - ROSTER_INFO_START_ROW + 1;
   if (numRows <= 0) return { rows: 0, cols: 0, elapsed_ms: Date.now() - t0 };
 
-  // Single read across the bounding column span, then permute in memory —
-  // cheaper than four separate getValues() calls and easier to extend.
-  const minCol = Math.min.apply(null, ROSTER_INFO_SOURCE_COLUMNS);
-  const maxCol = Math.max.apply(null, ROSTER_INFO_SOURCE_COLUMNS);
-  const width = maxCol - minCol + 1;
+  // Single read across the bounding column span, then slice in memory.
+  const allSourceCols = ROSTER_INFO_AE_SOURCE_COLUMNS.concat([ROSTER_INFO_G_SOURCE_COLUMN]);
+  const minCol = Math.min.apply(null, allSourceCols);
+  const maxCol = Math.max.apply(null, allSourceCols);
+  const width  = maxCol - minCol + 1;
   const grid = src.getRange(ROSTER_INFO_START_ROW, minCol, numRows, width).getValues();
 
-  const outWidth = ROSTER_INFO_SOURCE_COLUMNS.length;
-  const merged = new Array(numRows);
+  const blockAE = new Array(numRows);
+  const blockG  = new Array(numRows);
   for (let r = 0; r < numRows; r++) {
-    const row = new Array(outWidth);
-    for (let c = 0; c < outWidth; c++) {
-      row[c] = grid[r][ROSTER_INFO_SOURCE_COLUMNS[c] - minCol];
+    const ae = new Array(ROSTER_INFO_AE_SOURCE_COLUMNS.length);
+    for (let c = 0; c < ROSTER_INFO_AE_SOURCE_COLUMNS.length; c++) {
+      ae[c] = grid[r][ROSTER_INFO_AE_SOURCE_COLUMNS[c] - minCol];
     }
-    merged[r] = row;
+    blockAE[r] = ae;
+    blockG[r]  = [grid[r][ROSTER_INFO_G_SOURCE_COLUMN - minCol]];
   }
 
   const destSs = SpreadsheetApp.openById(ROSTER_INFO_DEST_SPREADSHEET_ID);
-  let tgt = destSs.getSheetByName(ROSTER_INFO_DEST_TAB);
-  if (!tgt) tgt = destSs.insertSheet(ROSTER_INFO_DEST_TAB);
-  tgt.clearContents();
-  tgt.getRange(1, 1, merged.length, merged[0].length).setValues(merged);
+  const tgt = destSs.getSheetByName(ROSTER_INFO_DEST_TAB);
+  if (!tgt) {
+    // Deliberately do NOT auto-create — Roster_Info must already exist with
+    // its header rows + formula columns. Creating a blank tab here would
+    // mask a configuration error and the consumer would silently lose data.
+    throw new Error("Destination tab not found: " + ROSTER_INFO_DEST_TAB);
+  }
 
-  return { rows: merged.length, cols: outWidth, elapsed_ms: Date.now() - t0 };
+  // Figure out the previous last data row by scanning column A from the
+  // bottom up. We clear from row 3 down to max(prev, new) so a shrinking
+  // depth chart doesn't leave zombie rows behind, and an expanding one
+  // simply gets fully overwritten by the setValues that follow.
+  const scanRows = tgt.getMaxRows() - ROSTER_INFO_DEST_START_ROW + 1;
+  let prevLastRow = ROSTER_INFO_DEST_START_ROW - 1;
+  if (scanRows > 0) {
+    const aCol = tgt.getRange(ROSTER_INFO_DEST_START_ROW, 1, scanRows, 1).getValues();
+    for (let i = aCol.length - 1; i >= 0; i--) {
+      const v = aCol[i][0];
+      if (v !== "" && v !== null && v !== undefined) {
+        prevLastRow = ROSTER_INFO_DEST_START_ROW + i;
+        break;
+      }
+    }
+  }
+  const newLastRow = ROSTER_INFO_DEST_START_ROW + numRows - 1;
+  const clearLastRow = Math.max(prevLastRow, newLastRow);
+  const clearRows = clearLastRow - ROSTER_INFO_DEST_START_ROW + 1;
+  if (clearRows > 0) {
+    tgt.getRange(ROSTER_INFO_DEST_START_ROW, 1, clearRows, 5).clearContent(); // A:E
+    tgt.getRange(ROSTER_INFO_DEST_START_ROW, 7, clearRows, 1).clearContent(); // G
+  }
+
+  tgt.getRange(ROSTER_INFO_DEST_START_ROW, 1, numRows, 5).setValues(blockAE);
+  tgt.getRange(ROSTER_INFO_DEST_START_ROW, 7, numRows, 1).setValues(blockG);
+
+  return { rows: numRows, cols: 6, elapsed_ms: Date.now() - t0 };
 }
 
 // === Helpers ==============================================================
