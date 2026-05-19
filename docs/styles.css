@@ -387,6 +387,45 @@ select { min-width: 100px; }
 .cell-input:hover { border-color: var(--border-primary); }
 .cell-input:focus { outline: none; border-color: var(--accent); background: rgba(255,255,255,0.04); }
 
+/* Soft warning for duplicate jersey numbers on the same team. */
+.cell-input.cell-input--dup {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.10);
+  color: var(--text-primary);
+}
+.cell-input.cell-input--dup:focus {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.dup-jersey-banner {
+  background: rgba(245, 158, 11, 0.10);
+  border-left: 4px solid #f59e0b;
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+.dup-jersey-banner__summary { margin-bottom: 6px; }
+.dup-jersey-banner__list {
+  margin: 0;
+  padding-left: 18px;
+}
+.dup-jersey-banner__list li {
+  padding: 2px 0;
+}
+.dup-jersey-banner__num {
+  display: inline-block;
+  min-width: 38px;
+  padding: 1px 6px;
+  margin-right: 6px;
+  border-radius: 3px;
+  background: rgba(245, 158, 11, 0.20);
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
 .cell-checkbox {
   width: 16px;
   height: 16px;

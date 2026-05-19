@@ -405,6 +405,11 @@ function renderTeamView() {
     state.currentCategory = cats[0] || null;
   }
 
+  // Recompute the duplicate-jersey map for the current team so render-time
+  // checks against it are O(1). FA gets included too — duplicates there are
+  // less meaningful but flagging them is still strictly informational.
+  state.dupJerseysCurrentTeam = _duplicateJerseyMap(team);
+
   // Tabs
   const tabsEl = document.getElementById("category-tabs");
   tabsEl.innerHTML = "";
@@ -458,6 +463,10 @@ function renderTeamView() {
     });
     content.appendChild(renderPositionCard(pos, rows));
   }
+
+  // Surface duplicate jerseys at the top of the team view — visible even
+  // when the conflicting rows live on different category tabs.
+  _renderDuplicateJerseyBanner(team, content);
 }
 
 function renderPositionCard(pos, rows) {
@@ -596,8 +605,82 @@ function renderEditableCell(r, key) {
   input.className = "cell-input";
   input.value = val;
   input.dataset.key = key;
+  if (key === "jersey") {
+    _annotateJerseyDuplicate(input, r, val);
+  }
   input.addEventListener("change", () => recordEdit(r, key, input.value));
   return input;
+}
+
+// --- Duplicate jersey detection -------------------------------------------
+//
+// Two rows on the same team with the same non-empty jersey number is almost
+// always a mistake (one player got the number, the other still has the old
+// value). We surface it as a soft warning — the input gets a red border +
+// tooltip, and a banner at the top of the team view lists every dup so the
+// user notices even when the conflicting rows live on different category
+// tabs. FA ("free agent") is treated like any other team for the scan; the
+// noise there is low because we only flag duplicates within the same `team`
+// string.
+
+function _duplicateJerseyMap(team) {
+  const map = new Map();
+  if (!team) return map;
+  for (const r of state.rows) {
+    if ((r.team || "").trim() !== team) continue;
+    const j = (r.jersey || "").trim();
+    if (!j) continue;
+    if (!map.has(j)) map.set(j, []);
+    map.get(j).push(r);
+  }
+  // Strip singletons — only the conflicting ones matter.
+  for (const [k, v] of map) {
+    if (v.length < 2) map.delete(k);
+  }
+  return map;
+}
+
+function _annotateJerseyDuplicate(input, r, val) {
+  const dupMap = state.dupJerseysCurrentTeam;
+  if (!dupMap) return;
+  const j = String(val ?? "").trim();
+  if (!j) return;
+  const group = dupMap.get(j);
+  if (!group || group.length < 2) return;
+  const others = group
+    .filter(o => o._sheet_row !== r._sheet_row)
+    .map(o => `${o.displayName || "(unnamed)"}${o.depthPosition ? ` (${o.depthPosition})` : ""}`);
+  if (others.length === 0) return;
+  input.classList.add("cell-input--dup");
+  input.title =
+    `Duplicate jersey #${j} on ${r.team}: also assigned to ${others.join(", ")}.\n` +
+    `Heads-up only — this won't block sync, but two players sharing a number is usually a leftover edit.`;
+}
+
+function _renderDuplicateJerseyBanner(team, container) {
+  const dupMap = state.dupJerseysCurrentTeam;
+  if (!dupMap || dupMap.size === 0) return;
+  const banner = document.createElement("div");
+  banner.className = "dup-jersey-banner";
+  const total = Array.from(dupMap.values()).reduce((acc, g) => acc + g.length, 0);
+  const summary = document.createElement("div");
+  summary.className = "dup-jersey-banner__summary";
+  summary.innerHTML =
+    `<strong>${dupMap.size}</strong> duplicate jersey number${dupMap.size === 1 ? "" : "s"} on ${escapeHTML(team)} ` +
+    `(<strong>${total}</strong> player${total === 1 ? "" : "s"} affected).`;
+  banner.appendChild(summary);
+  const list = document.createElement("ul");
+  list.className = "dup-jersey-banner__list";
+  for (const [jersey, group] of dupMap) {
+    const li = document.createElement("li");
+    const names = group
+      .map(r => `${r.displayName || "(unnamed)"}${r.depthPosition ? ` <span class="muted">${escapeHTML(r.depthPosition)}</span>` : ""}`)
+      .join(" · ");
+    li.innerHTML = `<span class="dup-jersey-banner__num">#${escapeHTML(jersey)}</span> ${names}`;
+    list.appendChild(li);
+  }
+  banner.appendChild(list);
+  container.insertBefore(banner, container.firstChild);
 }
 
 function renderSelectCell(r, key, val, options) {
