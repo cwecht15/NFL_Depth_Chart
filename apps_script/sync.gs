@@ -272,7 +272,7 @@ function handleSync(payload, actorEmail) {
 //     editor uses for writes) — see _readTargetTab for the pattern.
 
 const ROSTER_INFO_DEST_SPREADSHEET_ID = "1zry9ZCAOoevHN9-EnVpGt7YzHmq8MuUZA_AjXjJO250";
-const ROSTER_INFO_DEST_TAB            = "Roster_info";
+const ROSTER_INFO_DEST_TAB            = "Roster_Info";
 const ROSTER_INFO_SOURCE_TAB          = "DepthCharts";
 const ROSTER_INFO_START_ROW           = 5;
 const ROSTER_INFO_MAX_ROW             = 5000;
