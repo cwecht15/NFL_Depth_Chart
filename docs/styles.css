@@ -325,6 +325,37 @@ select { min-width: 100px; }
 .tbl td.col--name  { font-weight: 600; color: var(--text-heading); }
 .tbl td.col--readonly { color: var(--text-muted); }
 
+/* Drag handle column (leading) — only the grip is draggable; the row is the
+   drop target. Keep the column narrow so it doesn't push real data offscreen. */
+.tbl th.col--drag,
+.tbl td.col--drag {
+  width: 22px;
+  min-width: 22px;
+  padding: 4px 4px;
+  text-align: center;
+  color: var(--text-muted);
+  user-select: none;
+}
+.tbl td.col--drag .drag-grip {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  line-height: 1;
+  letter-spacing: -2px;
+  padding: 4px 2px;
+  color: var(--text-muted);
+  cursor: grab;
+  border-radius: 3px;
+}
+.tbl td.col--drag .drag-grip:hover { color: var(--text-primary); background: rgba(255,255,255,0.04); }
+.tbl td.col--drag .drag-grip:active { cursor: grabbing; }
+.tbl td.col--drag .drag-grip.drag-grip--locked { cursor: not-allowed; opacity: 0.35; }
+.tbl td.col--drag .drag-grip.drag-grip--locked:hover { color: var(--text-muted); background: transparent; }
+
+.tbl tbody tr.is-dragging td { opacity: 0.45; }
+.tbl tbody tr.drop-above td { box-shadow: inset 0 2px 0 0 var(--accent); }
+.tbl tbody tr.drop-below td { box-shadow: inset 0 -2px 0 0 var(--accent); }
+
 /* Per-column min widths so text inputs aren't truncated to "Marvin H". */
 .tbl th[data-col="displayName"],        .tbl td[data-col="displayName"]        { min-width: 200px; }
 .tbl th[data-col="firstName"],          .tbl td[data-col="firstName"]          { min-width: 110px; }

@@ -479,6 +479,11 @@ function renderPositionCard(pos, rows) {
 
   const thead = document.createElement("thead");
   const trh = document.createElement("tr");
+  const thDrag = document.createElement("th");
+  thDrag.className = "col--drag";
+  thDrag.dataset.col = "_drag";
+  thDrag.title = "Drag to reorder within the same depthPosition";
+  trh.appendChild(thDrag);
   for (const c of DISPLAY_COLUMNS) {
     const th = document.createElement("th");
     th.textContent = c;
@@ -501,8 +506,35 @@ function renderPositionCard(pos, rows) {
 function renderRow(r) {
   const tr = document.createElement("tr");
   tr.dataset.sheetRow = String(r._sheet_row);
+  tr.dataset.depthPosition = (r.depthPosition || "").trim();
+  tr.dataset.depthPositionCategory = (r.depthPositionCategory || "").trim();
+  tr.dataset.team = (r.team || "").trim();
   if (state.editedRowKeys.has(r._sheet_row)) tr.classList.add("row--edited");
   if (isPlaceholder(r.eliasId)) tr.classList.add("row--placeholder");
+
+  // Drag handle (leading column). Only the grip is draggable, so clicking
+  // inputs/selects elsewhere in the row still focuses them normally.
+  const dragTd = document.createElement("td");
+  dragTd.className = "col--drag";
+  dragTd.dataset.col = "_drag";
+  const grip = document.createElement("span");
+  grip.className = "drag-grip";
+  grip.textContent = "⋮⋮";
+  const editable = canEditRow(r);
+  grip.draggable = editable;
+  grip.title = editable
+    ? `Drag to reorder ${r.displayName || "this player"} within ${r.depthPosition || "this position"}`
+    : lockGateMessage(r);
+  if (!editable) grip.classList.add("drag-grip--locked");
+  grip.addEventListener("dragstart", onGripDragStart);
+  grip.addEventListener("dragend", onGripDragEnd);
+  dragTd.appendChild(grip);
+  tr.appendChild(dragTd);
+
+  // Drop targets live on the row itself — the grip is just the source.
+  tr.addEventListener("dragover", onRowDragOver);
+  tr.addEventListener("dragleave", onRowDragLeave);
+  tr.addEventListener("drop", onRowDrop);
 
   for (const key of DISPLAY_COLUMNS) {
     const td = document.createElement("td");
@@ -590,6 +622,170 @@ function renderSelectCell(r, key, val, options) {
   sel.value = val || "";
   sel.addEventListener("change", () => recordEdit(r, key, sel.value));
   return sel;
+}
+
+// ---------------------------------------------------------------------------
+// Drag-to-reorder within a depthPosition
+// ---------------------------------------------------------------------------
+//
+// depthOrder is a sheet-side COUNTIFS that ranks rows within depthPosition by
+// their physical sheet-row position. To "reorder" we don't write depthOrder
+// (it's read-only) — we permute the manual-key payload between the slots in
+// sheet-row order so the next COUNTIFS pass produces the user's new ranking.
+
+let _dragSourceSheetRow = null;
+
+function onGripDragStart(ev) {
+  const grip = ev.currentTarget;
+  const tr = grip.closest("tr");
+  if (!tr || !grip.draggable) { ev.preventDefault(); return; }
+  _dragSourceSheetRow = Number(tr.dataset.sheetRow);
+  tr.classList.add("is-dragging");
+  if (ev.dataTransfer) {
+    ev.dataTransfer.effectAllowed = "move";
+    try { ev.dataTransfer.setData("text/plain", String(_dragSourceSheetRow)); } catch (e) {}
+    // Use the row as the drag image for clearer affordance.
+    try { ev.dataTransfer.setDragImage(tr, 12, 12); } catch (e) {}
+  }
+}
+
+function onGripDragEnd(ev) {
+  const tr = ev.currentTarget.closest("tr");
+  if (tr) tr.classList.remove("is-dragging");
+  document.querySelectorAll(".tbl tr.drop-above, .tbl tr.drop-below").forEach((el) => {
+    el.classList.remove("drop-above", "drop-below");
+  });
+  _dragSourceSheetRow = null;
+}
+
+function _dragSourceTr(targetTr) {
+  // Only valid as a drop target if the source is in the same tbody AND has
+  // the same depthPosition. Cross-position drags are rejected.
+  if (_dragSourceSheetRow == null) return null;
+  const tbody = targetTr.parentElement;
+  if (!tbody) return null;
+  const src = tbody.querySelector(`tr[data-sheet-row="${_dragSourceSheetRow}"]`);
+  if (!src) return null;
+  if (src === targetTr) return null;
+  if (src.dataset.depthPosition !== targetTr.dataset.depthPosition) return null;
+  return src;
+}
+
+function onRowDragOver(ev) {
+  const tr = ev.currentTarget;
+  if (!_dragSourceTr(tr)) return;
+  ev.preventDefault();
+  if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+  const rect = tr.getBoundingClientRect();
+  const above = ev.clientY < rect.top + rect.height / 2;
+  tr.classList.toggle("drop-above", above);
+  tr.classList.toggle("drop-below", !above);
+}
+
+function onRowDragLeave(ev) {
+  ev.currentTarget.classList.remove("drop-above", "drop-below");
+}
+
+function onRowDrop(ev) {
+  const tr = ev.currentTarget;
+  const src = _dragSourceTr(tr);
+  if (!src) return;
+  ev.preventDefault();
+  tr.classList.remove("drop-above", "drop-below");
+  const rect = tr.getBoundingClientRect();
+  const placeAbove = ev.clientY < rect.top + rect.height / 2;
+  performReorder(_dragSourceSheetRow, Number(tr.dataset.sheetRow), placeAbove);
+}
+
+function _manualFieldSnapshot(row) {
+  const out = {};
+  if (!row) return out;
+  for (const k of MANUAL_KEYS) out[k] = row[k] ?? "";
+  return out;
+}
+
+function performReorder(sourceSheetRow, targetSheetRow, placeAbove) {
+  const byKey = new Map(state.rows.map((r) => [r._sheet_row, r]));
+  const src = byKey.get(sourceSheetRow);
+  const tgt = byKey.get(targetSheetRow);
+  if (!src || !tgt) return;
+  if (!canEditRow(src) || !canEditRow(tgt)) {
+    toast(lockGateMessage(src), 4000);
+    renderTeamView();
+    return;
+  }
+  const team = (src.team || "").trim();
+  const dp   = (src.depthPosition || "").trim();
+  const cat  = (src.depthPositionCategory || "").trim();
+  // Slots = rows sharing this team / depthPositionCategory / depthPosition,
+  // in ascending sheet-row order (== the COUNTIFS rank input order).
+  const slotRows = state.rows
+    .filter((r) =>
+      (r.team || "").trim() === team &&
+      (r.depthPosition || "").trim() === dp &&
+      (r.depthPositionCategory || "").trim() === cat
+    )
+    .sort((a, b) => Number(a._sheet_row) - Number(b._sheet_row));
+  if (slotRows.length < 2) return;
+  const slotSheetRows = slotRows.map((r) => Number(r._sheet_row));
+
+  // Compute the new occupant order: take current order, pull source out,
+  // reinsert above-or-below the drop target.
+  const withoutSrc = slotSheetRows.filter((sr) => sr !== sourceSheetRow);
+  const tIdx = withoutSrc.indexOf(targetSheetRow);
+  if (tIdx < 0) return;
+  const insertAt = placeAbove ? tIdx : tIdx + 1;
+  const newOccupantOrder = withoutSrc.slice();
+  newOccupantOrder.splice(insertAt, 0, sourceSheetRow);
+  if (newOccupantOrder.length !== slotSheetRows.length) return;
+
+  // No-op?
+  let unchanged = true;
+  for (let i = 0; i < slotSheetRows.length; i++) {
+    if (newOccupantOrder[i] !== slotSheetRows[i]) { unchanged = false; break; }
+  }
+  if (unchanged) return;
+
+  // Snapshot each occupant's manual fields BEFORE we start mutating slots.
+  const occupantSnapshots = newOccupantOrder.map((sr) => _manualFieldSnapshot(byKey.get(sr)));
+
+  const now = new Date().toISOString();
+  let cellsChanged = 0;
+  for (let i = 0; i < slotSheetRows.length; i++) {
+    const slotRow = byKey.get(slotSheetRows[i]);
+    const desired = occupantSnapshots[i];
+    for (const k of MANUAL_KEYS) {
+      const before = slotRow[k] ?? "";
+      const after  = desired[k] ?? "";
+      if (String(before) === String(after)) continue;
+      slotRow[k] = after;
+      state.editedRowKeys.add(slotRow._sheet_row);
+      state.edits.push({
+        sheet_row: slotRow._sheet_row,
+        column: k,
+        before: before,
+        after: after,
+        ts: now,
+        who: state.authedEmail || "anon",
+      });
+      cellsChanged++;
+    }
+  }
+
+  if (cellsChanged === 0) return;
+
+  // Update depthOrder browser-side for immediate visual feedback. Not logged
+  // as an edit — depthOrder is a formula column and is excluded from sync.
+  for (let i = 0; i < slotSheetRows.length; i++) {
+    const slotRow = byKey.get(slotSheetRows[i]);
+    slotRow.depthOrder = String(i + 1);
+  }
+
+  persistEdits();
+  updateEditCount();
+  renderTeamView();
+  rebuildWarnings();
+  toast(`Reordered ${dp || "depth chart"} (${cellsChanged} cell${cellsChanged === 1 ? "" : "s"} changed).`, 3000);
 }
 
 // ---------------------------------------------------------------------------
