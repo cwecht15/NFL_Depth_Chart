@@ -622,6 +622,21 @@ function renderEditableCell(r, key) {
 // tabs. FA ("free agent") is treated like any other team for the scan; the
 // noise there is low because we only flag duplicates within the same `team`
 // string.
+//
+// One wrinkle: a single player can legitimately appear on multiple depth-chart
+// rows (e.g. Marvin Mims at RWR + PR + KR) all sharing the same jersey. Those
+// aren't conflicts, so we collapse rows to one entry per *player* (gsisId →
+// eliasId → normalized name) before counting.
+
+function _playerKey(r) {
+  const g = (r.gsisId || "").trim();
+  if (g) return "g:" + g;
+  const e = (r.eliasId || "").trim();
+  if (e) return "e:" + e;
+  const n = _normalizeName(r.displayName);
+  if (n) return "n:" + n;
+  return "row:" + r._sheet_row;
+}
 
 function _duplicateJerseyMap(team) {
   const map = new Map();
@@ -633,11 +648,28 @@ function _duplicateJerseyMap(team) {
     if (!map.has(j)) map.set(j, []);
     map.get(j).push(r);
   }
-  // Strip singletons — only the conflicting ones matter.
+  // Strip singletons and same-player multi-position rows — only conflicts
+  // between *different* players matter.
   for (const [k, v] of map) {
-    if (v.length < 2) map.delete(k);
+    const distinct = new Set(v.map(_playerKey));
+    if (distinct.size < 2) map.delete(k);
   }
   return map;
+}
+
+// Pick one representative row per player from a duplicate-jersey group, so
+// the banner/tooltip lists each player once even when they hold multiple
+// depth-chart slots.
+function _distinctPlayerRows(group) {
+  const seen = new Set();
+  const out = [];
+  for (const r of group) {
+    const k = _playerKey(r);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
 }
 
 function _annotateJerseyDuplicate(input, r, val) {
@@ -647,8 +679,9 @@ function _annotateJerseyDuplicate(input, r, val) {
   if (!j) return;
   const group = dupMap.get(j);
   if (!group || group.length < 2) return;
-  const others = group
-    .filter(o => o._sheet_row !== r._sheet_row)
+  const myKey = _playerKey(r);
+  const others = _distinctPlayerRows(group)
+    .filter(o => _playerKey(o) !== myKey)
     .map(o => `${o.displayName || "(unnamed)"}${o.depthPosition ? ` (${o.depthPosition})` : ""}`);
   if (others.length === 0) return;
   input.classList.add("cell-input--dup");
@@ -662,7 +695,9 @@ function _renderDuplicateJerseyBanner(team, container) {
   if (!dupMap || dupMap.size === 0) return;
   const banner = document.createElement("div");
   banner.className = "dup-jersey-banner";
-  const total = Array.from(dupMap.values()).reduce((acc, g) => acc + g.length, 0);
+  const distinctGroups = Array.from(dupMap.entries())
+    .map(([j, g]) => [j, _distinctPlayerRows(g)]);
+  const total = distinctGroups.reduce((acc, [, g]) => acc + g.length, 0);
   const summary = document.createElement("div");
   summary.className = "dup-jersey-banner__summary";
   summary.innerHTML =
@@ -671,7 +706,7 @@ function _renderDuplicateJerseyBanner(team, container) {
   banner.appendChild(summary);
   const list = document.createElement("ul");
   list.className = "dup-jersey-banner__list";
-  for (const [jersey, group] of dupMap) {
+  for (const [jersey, group] of distinctGroups) {
     const li = document.createElement("li");
     const names = group
       .map(r => `${r.displayName || "(unnamed)"}${r.depthPosition ? ` <span class="muted">${escapeHTML(r.depthPosition)}</span>` : ""}`)
