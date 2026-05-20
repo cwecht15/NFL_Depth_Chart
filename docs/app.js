@@ -1674,13 +1674,17 @@ function computeTransactionWarnings() {
     if (!expect) continue;
 
     const id = `tx|${date}|${(gsisId || _normalizeName(name)).replace(/\s+/g, "_")}|${type}`;
+    // NFL.com uses ARI/BAL/CLE/HOU/OAK/LAR; the chart uses ARZ/BLT/CLV/HST/LV/LA.
+    // Display the chart's abbreviation everywhere so a user scanning by team
+    // sees the same code they use in the picker.
+    const displayTeam = _normalizeTeam(teamAbbr) || teamAbbr;
 
     if (matches.length === 0) {
       // Player not present in our chart at all.
       if (expect.shouldExistOnTeam) {
         out.push({
           id, source: "transactions",
-          team: teamAbbr, player: name || gsisId,
+          team: displayTeam, player: name || gsisId,
           date,
           title: `${expect.label}: not in chart`,
           detail: `${date}: ${desc || type}. No row in DepthCharts for ${name || gsisId}.`,
@@ -1696,7 +1700,7 @@ function computeTransactionWarnings() {
       out.push({
         id,
         source: "transactions",
-        team: teamAbbr,
+        team: displayTeam,
         player: name || row.displayName,
         date,
         title: `${expect.label}: ${mismatch.summary}`,
@@ -1756,9 +1760,12 @@ function _diagnoseMismatch(row, expect) {
     const t = (row.team || "").toUpperCase();
     const e = expect.teamShouldBe.toUpperCase();
     if (t !== e && _normalizeTeam(t) !== _normalizeTeam(e)) {
+      // Show the chart-side abbreviation for the expected team so the
+      // mismatch text uses the same code the user sees in their chart.
+      const expectDisplay = _normalizeTeam(expect.teamShouldBe) || expect.teamShouldBe;
       return {
-        summary: `team ${row.team || "(blank)"} != ${expect.teamShouldBe}`,
-        detail: `Row shows team=${row.team || "(blank)"} but transaction expects ${expect.teamShouldBe}.`,
+        summary: `team ${row.team || "(blank)"} != ${expectDisplay}`,
+        detail: `Row shows team=${row.team || "(blank)"} but transaction expects ${expectDisplay}.`,
       };
     }
   }
