@@ -1981,11 +1981,18 @@ function renderWarnings() {
     return;
   }
 
-  // Sort: undismissed first, then by team, then by source.
+  // Sort: undismissed first, then newest transaction date first (so a fresh
+  // signing review surfaces today's moves at the top), then by team and
+  // source as tiebreakers so same-team warnings still cluster within a day.
+  // OurLads warnings have no date — fall back to "" which sorts after dated
+  // rows under desc compare.
   visible.sort((a, b) => {
     const da = dismissed.has(a.id) ? 1 : 0;
     const db = dismissed.has(b.id) ? 1 : 0;
     if (da !== db) return da - db;
+    const dateA = a.date || "";
+    const dateB = b.date || "";
+    if (dateA !== dateB) return dateB.localeCompare(dateA);
     if (a.team !== b.team) return (a.team || "").localeCompare(b.team || "");
     return (a.source || "").localeCompare(b.source || "");
   });
