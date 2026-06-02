@@ -2135,10 +2135,17 @@ function restoreDismissedWarnings() {
 // ---------------------------------------------------------------------------
 
 function getSyncUrl() {
-  return (localStorage.getItem(LS_SYNC_URL) || "").trim();
+  // A per-browser override (set in Settings) wins; otherwise fall back to the
+  // sync_url baked into auth.config.json so the deploy works for every user
+  // without anyone pasting a URL. The config field is optional.
+  const override = (localStorage.getItem(LS_SYNC_URL) || "").trim();
+  if (override) return override;
+  return ((state.authConfig && state.authConfig.sync_url) || "").trim();
 }
 function getTargetTab() {
-  return (localStorage.getItem(LS_TARGET_TAB) || "").trim() || DEFAULT_TARGET_TAB;
+  const override = (localStorage.getItem(LS_TARGET_TAB) || "").trim();
+  if (override) return override;
+  return ((state.authConfig && state.authConfig.target_tab) || "").trim() || DEFAULT_TARGET_TAB;
 }
 
 function openSettings(open) {

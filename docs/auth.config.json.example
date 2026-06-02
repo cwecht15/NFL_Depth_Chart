@@ -2,11 +2,14 @@
   "_doc": [
     "Copy this file to docs/auth.config.json and fill in your Google OAuth Client ID and the editor allowlist.",
     "Sign-in is MANDATORY in multi-user mode. If docs/auth.config.json is missing or has no client_id, the editor refuses to start.",
-    "The allowlist also drives the server-side EDITOR_ALLOWLIST constant in apps_script/sync.gs — keep them in sync."
+    "The allowlist also drives the server-side EDITOR_ALLOWLIST constant in apps_script/sync.gs — keep them in sync.",
+    "sync_url (optional): the deployed Apps Script /exec URL. When set, it's the default for every user so nobody has to paste it in Settings; a user can still override it per-browser in Settings. Omit it to require manual entry.",
+    "target_tab (optional): default sheet tab to sync to. Falls back to 'DepthCharts' when omitted."
   ],
   "client_id": "YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com",
   "allowlist": [
     "alice@example.com",
     "bob@example.com"
-  ]
+  ],
+  "sync_url": "https://script.google.com/macros/s/AKfycbXXXXXXXXXXXXXXX.../exec"
 }
