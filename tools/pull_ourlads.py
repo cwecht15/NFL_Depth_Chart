@@ -15,8 +15,18 @@ Schema:
           ...
         ],
         ...
+      },
+      "updates": {
+        "ARZ": { "text": "08/26/2026 4:36PM ET",      # verbatim from the page
+                 "iso":  "2026-08-26T20:36:00Z" },     # parsed, UTC; null if unparseable
+        ...
       }
     }
+
+`updates` is the "Updated: MM/DD/YYYY H:MMPM ET" stamp OurLads prints at the
+top of every team page (`<div id="ctl00_phContent_DateUpd" class="dc-upd">`).
+The Pages editor's OurLads tracker compares it against when one of our
+editors last reviewed the team.
 
 This script is intentionally polite (1.5s between requests, real UA string).
 If OurLads ever breaks the format, the workflow will fail loudly rather than
@@ -30,31 +40,25 @@ import re
 import sys
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo  # needs the `tzdata` package on Windows
 
 import requests
 from bs4 import BeautifulSoup
 
 OUT_PATH = Path(__file__).resolve().parent.parent / "docs" / "data" / "ourlads.json"
 
+# OurLads stamps pages in US Eastern time ("ET").
+OURLADS_TZ = ZoneInfo("America/New_York")
+UPDATED_DIV_ID = "ctl00_phContent_DateUpd"
+
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 
-# OurLads uses NFL-standard 3-letter codes; we map them to the sheet's TV
-# abbreviations so warnings line up with `team` values in DepthCharts.
-OURLADS_TO_SHEET = {
-    "ARZ": "ARZ", "ATL": "ATL", "BAL": "BLT", "BUF": "BUF",
-    "CAR": "CAR", "CHI": "CHI", "CIN": "CIN", "CLE": "CLV",
-    "DAL": "DAL", "DEN": "DEN", "DET": "DET", "GB":  "GB",
-    "HOU": "HST", "IND": "IND", "JAX": "JAX", "KC":  "KC",
-    "LAC": "LAC", "LAR": "LA",  "LV":  "LV",  "MIA": "MIA",
-    "MIN": "MIN", "NE":  "NE",  "NO":  "NO",  "NYG": "NYG",
-    "NYJ": "NYJ", "PHI": "PHI", "PIT": "PIT", "SEA": "SEA",
-    "SF":  "SF",  "TB":  "TB",  "TEN": "TEN", "WAS": "WAS",
-}
-
-# OurLads URL takes a slugged team key (e.g., "ARI" for Arizona, "LAR" for Rams)
+# Keys are the sheet's TV abbreviations (BLT/CLV/HST/LA...) so the output
+# lines up with `team` values in DepthCharts; values are the NFL-standard
+# codes OurLads uses in its URLs (e.g., "LAR" for the Rams).
 TEAM_URL_SLUGS = {
     "ARZ": "ARZ", "ATL": "ATL", "BLT": "BAL", "BUF": "BUF",
     "CAR": "CAR", "CHI": "CHI", "CIN": "CIN", "CLV": "CLE",
@@ -96,14 +100,41 @@ def _fetch(url: str) -> str:
     return r.text
 
 
-def _parse_team(html: str, team: str) -> list[dict]:
+def _parse_updated(soup: BeautifulSoup) -> dict | None:
+    """Extract the page's "Updated: 08/26/2026 4:36PM ET" stamp.
+
+    Returns {"text": <verbatim, without the "Updated:" prefix>, "iso": <UTC
+    ISO-8601 or None>} — or None when the element is missing entirely. A
+    stamp we can see but can't parse still ships (`iso: None`) so the
+    tracker can at least show the raw text.
+    """
+    el = soup.find(id=UPDATED_DIV_ID) or soup.find("div", class_="dc-upd")
+    if not el:
+        return None
+    raw = el.get_text(" ", strip=True)
+    text = re.sub(r"^\s*updated:?\s*", "", raw, flags=re.IGNORECASE).strip()
+    if not text:
+        return None
+    iso: str | None = None
+    m = re.match(r"(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}:\d{2})\s*([AP]M)", text, flags=re.IGNORECASE)
+    if m:
+        try:
+            local = dt.datetime.strptime(
+                f"{m.group(1)} {m.group(2)}{m.group(3).upper()}", "%m/%d/%Y %I:%M%p"
+            ).replace(tzinfo=OURLADS_TZ)
+            iso = local.astimezone(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        except ValueError:
+            iso = None
+    return {"text": text, "iso": iso}
+
+
+def _parse_team(soup: BeautifulSoup) -> list[dict]:
     """Parse a single team's depth chart page.
 
     OurLads uses a table where each row is a depth position (e.g., 'LWR') and
     the player columns are 1st-, 2nd-, 3rd-string etc. We pivot that into
     one record per (player, depth_position, depth_order).
     """
-    soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table", id="ctl00_phContent_gvChart") or soup.find("table", class_="table")
     if not table:
         return []
@@ -200,18 +231,26 @@ def _clean_player(text: str) -> str:
 
 def main() -> int:
     teams: dict[str, list[dict]] = {}
+    updates: dict[str, dict] = {}
     failures: list[str] = []
     for sheet_team, ourlads_slug in TEAM_URL_SLUGS.items():
         url = f"https://www.ourlads.com/nfldepthcharts/depthchart/{ourlads_slug}"
         try:
             html = _fetch(url)
-            players = _parse_team(html, sheet_team)
+            soup = BeautifulSoup(html, "html.parser")
+            players = _parse_team(soup)
+            updated = _parse_updated(soup)
         except Exception as e:
             failures.append(f"{sheet_team}: {type(e).__name__}: {e}")
             time.sleep(1.5)
             continue
         teams[sheet_team] = players
-        print(f"  {sheet_team:4s} ({ourlads_slug:4s}): {len(players)} players", flush=True)
+        if updated:
+            updates[sheet_team] = updated
+        else:
+            failures.append(f"{sheet_team}: no 'Updated:' stamp found on page")
+        stamp = updated["text"] if updated else "no stamp"
+        print(f"  {sheet_team:4s} ({ourlads_slug:4s}): {len(players)} players, updated {stamp}", flush=True)
         time.sleep(1.5)
 
     if failures:
@@ -223,13 +262,18 @@ def main() -> int:
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "source": "https://www.ourlads.com",
         "teams": teams,
+        "updates": updates,
         "failures": failures,
     }
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     size_kb = OUT_PATH.stat().st_size / 1024
     total_players = sum(len(v) for v in teams.values())
-    print(f"Wrote {OUT_PATH} ({size_kb:.1f} KB; {len(teams)} teams, {total_players} players)", flush=True)
+    print(
+        f"Wrote {OUT_PATH} ({size_kb:.1f} KB; {len(teams)} teams, {total_players} players, "
+        f"{len(updates)} update stamps)",
+        flush=True,
+    )
 
     # Exit non-zero if everything failed; the workflow shouldn't commit an
     # all-empty payload over a working one.

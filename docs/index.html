@@ -23,6 +23,10 @@
         <span class="warnings-toggle__icon" aria-hidden="true">⚠</span>
         <span id="warnings-count">0</span>
       </button>
+      <button id="ourlads-toggle" class="btn btn--ghost ourlads-toggle" style="display:none;" title="OurLads update tracker">
+        <span class="ourlads-toggle__icon" aria-hidden="true">OL</span>
+        <span id="ourlads-count">–</span>
+      </button>
       <button id="settings-toggle" class="btn btn--ghost" title="Settings">⚙</button>
       <button id="signout-btn" class="btn btn--ghost" style="display:none;">Sign out</button>
     </div>
@@ -108,6 +112,33 @@
     <div class="warnings-panel__list" id="warnings-list"></div>
   </aside>
   <div id="warnings-scrim" class="warnings-scrim" aria-hidden="true"></div>
+
+  <!-- OurLads update tracker side drawer -->
+  <aside id="ourlads-panel" class="warnings-panel ourlads-panel" aria-hidden="true">
+    <div class="warnings-panel__head">
+      <h2>OurLads update tracker</h2>
+      <div class="warnings-panel__head-actions">
+        <button id="ourlads-refresh" class="btn btn--ghost" title="Re-fetch the OurLads scrape and the shared check log">Refresh</button>
+        <button id="ourlads-close" class="btn btn--ghost" aria-label="Close">×</button>
+      </div>
+    </div>
+    <div class="warnings-panel__sub">
+      When OurLads last republished each team's depth-chart page, next to when one of us
+      last reviewed it. <strong>Amber</strong> = OurLads changed since our last check (or never
+      checked); <strong>green</strong> = reviewed since. Click a team name to open it in the editor.
+    </div>
+    <div class="warnings-panel__sources" id="ourlads-sources">
+      <span class="muted" id="ourlads-src-scrape">OurLads scrape: …</span>
+      <span class="muted" id="ourlads-src-checks">Check log: …</span>
+    </div>
+    <div class="warnings-panel__filters" id="ourlads-filters">
+      <button class="chip chip--active" data-filter="all">All</button>
+      <button class="chip" data-filter="recheck">Needs re-check</button>
+      <button class="chip" data-filter="checked">Checked</button>
+    </div>
+    <div class="warnings-panel__list" id="ourlads-list"></div>
+  </aside>
+  <div id="ourlads-scrim" class="warnings-scrim" aria-hidden="true"></div>
 
   <!-- Auth gate: shown only if auth.config.json present + not yet signed in -->
   <div id="auth-gate" class="auth-gate" style="display:none;">

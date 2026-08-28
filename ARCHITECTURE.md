@@ -57,7 +57,7 @@ Depth_Chart/
     ├── README.md               Site-specific docs
     ├── .github/workflows/
     │   ├── snapshot.yml        */10 min: pull sheet + ESPN transactions
-    │   └── ourlads.yml         daily: scrape OurLads depth charts
+    │   └── ourlads.yml         hourly: scrape OurLads depth charts + "Updated" stamps
     ├── docs/                   ← Pages publishes from this folder
     │   ├── index.html
     │   ├── app.js
@@ -257,8 +257,8 @@ cd docs && python -m http.server 8000
 
 Production URL: <https://cwecht15.github.io/NFL_Depth_Chart/>. The
 `Pull DepthChart Snapshot` workflow refreshes the snapshot every 10
-minutes; `Scrape OurLads` refreshes the OurLads scrape once a day at
-12:30 UTC.
+minutes; `Scrape OurLads` refreshes the OurLads scrape (depth charts plus
+each page's "Updated" stamp) hourly at :07 UTC.
 
 ---
 
@@ -280,7 +280,7 @@ larger dry-run.
 
 ## Multi-user safeguards
 
-Two sidecar tabs persist shared state on the same workbook:
+Three sidecar tabs persist shared state on the same workbook:
 
 - **`Locks`** — one row per actively-edited team. Columns:
   `team | owner_email | acquired_at | last_heartbeat_at`. FA is never
@@ -290,10 +290,16 @@ Two sidecar tabs persist shared state on the same workbook:
 - **`AuditLog`** — append-only history. Columns:
   `ts | actor_email | action | team | sheet_row | column | before | after | details`.
   Actions: `edit`, `append`, `lock_acquired`, `lock_released`,
-  `lock_stolen`, `lock_acquired_after_steal`, `force_release`, and
-  `cli_bypass` / `cli_bypass_append`. The browser-sent
-  `payload.editor` is informational only — `actor_email` always comes
-  from `Session.getActiveUser().getEmail()` on the server.
+  `lock_stolen`, `lock_acquired_after_steal`, `force_release`,
+  `ourlads_checked`, and `cli_bypass` / `cli_bypass_append`. The
+  browser-sent `payload.editor` is informational only — `actor_email`
+  always comes from `Session.getActiveUser().getEmail()` on the server.
+- **`OurladsChecks`** — one row per team, upserted in place. Columns:
+  `team | checked_at | checked_by | ourlads_updated_at | ourlads_updated_text`.
+  Written by `markOurladsChecked`, read by `listOurladsChecks`. Records
+  when one of our editors last reviewed a team against OurLads and which
+  OurLads "Updated" stamp they saw. Marking does not require the team's
+  edit lock. See "OurLads update tracker" below.
 
 The browser side:
 
@@ -326,17 +332,39 @@ external feeds:
   offline reference but is no longer wired to the workflow — ESPN's feed
   bundles multi-player team-day sentences that produced noisy warnings.
 - **OurLads depth charts** — `pages-site/tools/pull_ourlads.py` scrapes
-  `https://www.ourlads.com/nfldepthcharts/depthchart/<TEAM>` once a day,
+  `https://www.ourlads.com/nfldepthcharts/depthchart/<TEAM>` hourly,
   parses the visible table into one record per
-  `(player, depth_position, depth_order)`, and writes
-  `docs/data/ourlads.json`. The scraper is polite (1.5 s between
-  requests, real UA) and refuses to overwrite the existing file if
-  every team scraped to zero players.
+  `(player, depth_position, depth_order)` under `teams[abbr]`, captures
+  each page's `Updated: MM/DD/YYYY H:MMPM ET` stamp under
+  `updates[abbr] = { text, iso }` (ET parsed to UTC; `iso` is `null` if
+  the text ever stops parsing), and writes `docs/data/ourlads.json`. The
+  scraper is polite (1.5 s between requests, real UA) and refuses to
+  overwrite the existing file if every team scraped to zero players.
 
 The frontend in `pages-site/docs/app.js` cross-references both feeds
 against the loaded snapshot and surfaces flags in the right-hand
 "External-source warnings" drawer. None of those flags mutate the depth
 chart automatically — they're hints for the editor.
+
+### OurLads update tracker
+
+The **OL** top-bar button opens a second drawer that turns the `updates`
+stamps into a review checklist:
+
+```
+ourlads.json.updates[team].iso   (OurLads' own "Updated" time, hourly scrape)
+          vs.
+OurladsChecks[team].checked_at   (when one of us last clicked "Mark checked")
+```
+
+`olTeamStatus()` in `app.js` yields `recheck` (never checked, or OurLads'
+stamp is newer than our check), `checked` (reviewed since — an exact
+`ourlads_updated_at` match short-circuits the clock comparison so skew
+can't misflag), or `unknown` (checked, but no parseable stamp to compare
+against). Amber rows + the badge count are the `recheck` set. The drawer
+fetches `?action=listOurladsChecks` on open (cached 60 s) and posts
+`markOurladsChecked` per click; `checked_by` is the verified caller
+identity, never a body field.
 
 ---
 
@@ -387,3 +415,5 @@ chart automatically — they're hints for the editor.
 | `Sync to sheet` button does nothing | Apps Script URL not configured | Settings (⚙) → paste the web-app URL → Save |
 | `sync_to_sheet.py` refuses to run against `DepthCharts` | Live tab is gated | Re-run with `--allow-prod --commit` only after a successful dry-run |
 | OurLads workflow exit code 2 | All scrapes returned 0 players | Open the workflow log; usually OurLads changed their table markup |
+| OurLads tracker shows "0 team stamps" / every "OurLads updated" cell is `—` | `ourlads.json` predates stamp capture, or OurLads renamed the `ctl00_phContent_DateUpd` div | Wait for the next hourly run; if `failures` lists "no 'Updated:' stamp", update `UPDATED_DIV_ID` in `tools/pull_ourlads.py` |
+| Tracker says "Check log: … not_authorized" / "sign_in_required" | Apps Script not redeployed with the `OurladsChecks` actions, or caller not on `EDITOR_ALLOWLIST` | Redeploy `sync.gs` as a new version; check the allowlist |

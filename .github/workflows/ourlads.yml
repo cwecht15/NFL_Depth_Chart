@@ -1,12 +1,16 @@
 name: Scrape OurLads
 
-# Daily scrape of OurLads team depth charts → docs/data/ourlads.json.
-# This is slower than the main snapshot (32 HTTP requests at 1.5s intervals
-# ≈ 50s) so it gets its own cron.
+# Hourly scrape of OurLads team depth charts → docs/data/ourlads.json.
+# Besides the depth-chart tables this captures each page's "Updated:" stamp,
+# which the editor's OurLads tracker compares against our own "last checked"
+# records — so it needs to run more often than the old daily cadence.
+# 32 HTTP requests at 1.5s intervals ≈ 50s. The commit step no-ops when
+# nothing changed, so Pages only rebuilds when OurLads actually republished.
+# Runs at :07 to stay clear of the */10 snapshot job.
 
 on:
   schedule:
-    - cron: "30 12 * * *"  # 12:30 UTC daily
+    - cron: "7 * * * *"  # hourly at :07 UTC
   workflow_dispatch: {}
 
 permissions:
@@ -27,7 +31,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install scraping deps
-        run: pip install requests beautifulsoup4
+        run: pip install requests beautifulsoup4 tzdata
 
       - name: Scrape OurLads
         run: python tools/pull_ourlads.py

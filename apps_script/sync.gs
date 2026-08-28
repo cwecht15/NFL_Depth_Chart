@@ -12,6 +12,10 @@
  * appending any new rows. The live "DepthCharts" tab is gated behind an
  * explicit `allow_prod` flag.
  *
+ * It also owns three sidecar tabs on the same workbook: `Locks` (per-team
+ * edit locks), `AuditLog` (append-only history), and `OurladsChecks` (who
+ * last reviewed each team against OurLads, and when).
+ *
  * SEE apps_script/README.md FOR DEPLOYMENT.
  */
 
@@ -68,6 +72,13 @@ const AUDIT_TAB  = "AuditLog";
 const LOCKS_HEADERS = ["team", "owner_email", "acquired_at", "last_heartbeat_at"];
 const AUDIT_HEADERS = ["ts", "actor_email", "action", "team", "sheet_row", "column", "before", "after", "details"];
 
+// OurLads tracker: one row per team recording when one of our editors last
+// reviewed that team against OurLads, and which OurLads "Updated" stamp they
+// were looking at. The Pages editor compares `ourlads_updated_at` / the
+// hourly scrape's stamp against `checked_at` to flag teams needing a re-check.
+const OL_CHECKS_TAB     = "OurladsChecks";
+const OL_CHECKS_HEADERS = ["team", "checked_at", "checked_by", "ourlads_updated_at", "ourlads_updated_text"];
+
 // Lock expires after 30 min of no heartbeat. Browser sends heartbeat every
 // 2 min; LOCK_TTL_SECONDS is the absolute idle threshold past which a peer
 // may force-take.
@@ -97,6 +108,15 @@ function doGet(e) {
       return _json({ ok: false, error: "not_authorized", email: actorEmail }, 403);
     }
     return _json(handleListLocks());
+  }
+  if (action === "listourladschecks") {
+    // Same gate as listLocks: the tab holds editor emails.
+    const actorEmail = _getCallerEmail(null, e);
+    if (!actorEmail) return _json({ ok: false, error: "sign_in_required" }, 401);
+    if (EDITOR_ALLOWLIST.length > 0 && !EDITOR_ALLOWLIST.includes(actorEmail)) {
+      return _json({ ok: false, error: "not_authorized", email: actorEmail }, 403);
+    }
+    return _json(handleListOurladsChecks());
   }
   if (action === "whoami") {
     // Diagnostic: returns what we think the caller's identity is plus where
@@ -152,6 +172,12 @@ function doPost(e) {
         break;
       case "forcereleaselock":
         result = handleForceReleaseLock(payload, actorEmail);
+        break;
+      case "listourladschecks":
+        result = handleListOurladsChecks();
+        break;
+      case "markourladschecked":
+        result = handleMarkOurladsChecked(payload, actorEmail);
         break;
       default:
         result = handleSync(payload, actorEmail);
@@ -893,6 +919,109 @@ function _teamsTouchedByDiff(updates, appends, target, payloadRows) {
     if (t) set[t] = true;
   }
   return Object.keys(set);
+}
+
+// === OurLads tracker ======================================================
+//
+// The Pages editor shows, per team, OurLads' own "Updated" stamp (scraped
+// hourly into docs/data/ourlads.json) next to when one of *our* editors last
+// reviewed that team. This tab is the shared store for the latter — one row
+// per team, upserted in place like `Locks`. `checked_by` is always the
+// verified caller identity; the browser can't set it. Marking a team checked
+// does NOT require holding its edit lock (it's a review, not an edit) but is
+// still audit-logged.
+
+function _ensureOurladsChecksSheet(ss) {
+  let sheet = ss.getSheetByName(OL_CHECKS_TAB);
+  if (!sheet) {
+    sheet = ss.insertSheet(OL_CHECKS_TAB);
+    sheet.getRange(1, 1, 1, OL_CHECKS_HEADERS.length).setValues([OL_CHECKS_HEADERS]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function _isoCell(v) {
+  // Sheets may coerce ISO strings into Date cells; normalise on the way out.
+  if (!v) return "";
+  return v instanceof Date ? v.toISOString() : String(v).trim();
+}
+
+function _readOurladsChecks(sheet) {
+  const lastRow = sheet.getLastRow();
+  const byTeam = {};
+  const rowsByTeam = {}; // team -> sheet row number for in-place edit
+  if (lastRow < 2) return { byTeam, rowsByTeam };
+  const values = sheet.getRange(2, 1, lastRow - 1, OL_CHECKS_HEADERS.length).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i];
+    const team = _normalizeTeam(row[0]);
+    if (!team) continue;
+    byTeam[team] = {
+      team: team,
+      checked_at: _isoCell(row[1]),
+      checked_by: String(row[2] || "").trim(),
+      ourlads_updated_at: _isoCell(row[3]),
+      ourlads_updated_text: String(row[4] || "").trim(),
+    };
+    rowsByTeam[team] = i + 2; // header is row 1
+  }
+  return { byTeam, rowsByTeam };
+}
+
+function _upsertOurladsCheck(sheet, state, rec) {
+  const row = [rec.team, rec.checked_at, rec.checked_by, rec.ourlads_updated_at, rec.ourlads_updated_text];
+  const existingRow = state.rowsByTeam[rec.team];
+  if (existingRow) {
+    sheet.getRange(existingRow, 1, 1, OL_CHECKS_HEADERS.length).setValues([row]);
+  } else {
+    sheet.appendRow(row);
+  }
+}
+
+function handleListOurladsChecks() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = _ensureOurladsChecksSheet(ss);
+  const state = _readOurladsChecks(sheet);
+  const checks = Object.keys(state.byTeam).map(function (t) { return state.byTeam[t]; });
+  return { ok: true, checks: checks };
+}
+
+function handleMarkOurladsChecked(payload, actorEmail) {
+  const team = _normalizeTeam(payload.team);
+  if (!team) return { ok: false, error: "missing_team" };
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const scriptLock = LockService.getScriptLock();
+  if (!scriptLock.tryLock(5000)) {
+    return { ok: false, error: "service_busy" };
+  }
+  try {
+    const sheet = _ensureOurladsChecksSheet(ss);
+    const state = _readOurladsChecks(sheet);
+    const now = new Date();
+    const previous = state.byTeam[team] || null;
+    const rec = {
+      team: team,
+      checked_at: now.toISOString(),
+      checked_by: actorEmail,
+      // What the browser was looking at when the editor clicked. Informational
+      // (the tracker re-derives "needs re-check" from the live scrape) but it
+      // makes the row self-explanatory when read in the sheet.
+      ourlads_updated_at: String(payload.ourlads_updated_at || "").trim(),
+      ourlads_updated_text: String(payload.ourlads_updated_text || "").trim(),
+    };
+    _upsertOurladsCheck(sheet, state, rec);
+    _writeAuditRows(ss, [_auditRow(now, actorEmail, "ourlads_checked", team, {
+      ourlads_updated_at: rec.ourlads_updated_at,
+      ourlads_updated_text: rec.ourlads_updated_text,
+      previous_checked_at: previous ? previous.checked_at : "",
+      previous_checked_by: previous ? previous.checked_by : "",
+    })]);
+    return { ok: true, check: rec };
+  } finally {
+    scriptLock.releaseLock();
+  }
 }
 
 // === Audit log ============================================================

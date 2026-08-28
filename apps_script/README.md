@@ -81,6 +81,20 @@ authentication (expected with "Anyone with Google account").
 - **New rows append below the last existing data row.** Custom players you
   add in the web app land at the bottom of the target tab.
 
+## Actions
+
+Every POST body carries `action` (default `sync`) plus `id_token`. GET
+supports `?action=listLocks`, `?action=listOurladsChecks`, and
+`?action=whoami` (all with `&id_token=…`).
+
+| Action | What it does | Sidecar tab |
+| ------ | ------------ | ----------- |
+| `sync` | Diff + (with `commit: true`) write manual cells; mirrors to `Roster_Info` | `AuditLog` |
+| `snapshot` | Read the live `DepthCharts` tab for the browser's "Refresh snapshot" | — |
+| `acquireLock` / `heartbeatLock` / `releaseLock` / `listLocks` / `forceReleaseLock` | Per-team edit locks | `Locks`, `AuditLog` |
+| `listOurladsChecks` | Return every team's last "checked against OurLads" record | `OurladsChecks` |
+| `markOurladsChecked` | Upsert `{ team, checked_at: now, checked_by: <verified caller>, ourlads_updated_at, ourlads_updated_text }`; logs `ourlads_checked` | `OurladsChecks`, `AuditLog` |
+
 ## Updating the script
 
 If you change `sync.gs`:

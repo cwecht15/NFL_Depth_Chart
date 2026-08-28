@@ -86,6 +86,26 @@ const FA_TEAM           = "FA";
 // Transactions_New fallback dumping months of stale rows.
 const TRANSACTION_WARN_DAYS = 14;
 
+// Full team names for the OurLads tracker table, keyed by the sheet's TV
+// abbreviations (BLT/CLV/HST/LA — same keys as ourlads.json `teams`).
+const OL_TEAM_NAMES = {
+  ARZ: "Arizona Cardinals",    ATL: "Atlanta Falcons",      BLT: "Baltimore Ravens",
+  BUF: "Buffalo Bills",        CAR: "Carolina Panthers",    CHI: "Chicago Bears",
+  CIN: "Cincinnati Bengals",   CLV: "Cleveland Browns",     DAL: "Dallas Cowboys",
+  DEN: "Denver Broncos",       DET: "Detroit Lions",        GB:  "Green Bay Packers",
+  HST: "Houston Texans",       IND: "Indianapolis Colts",   JAX: "Jacksonville Jaguars",
+  KC:  "Kansas City Chiefs",   LA:  "Los Angeles Rams",     LAC: "Los Angeles Chargers",
+  LV:  "Las Vegas Raiders",    MIA: "Miami Dolphins",       MIN: "Minnesota Vikings",
+  NE:  "New England Patriots", NO:  "New Orleans Saints",   NYG: "New York Giants",
+  NYJ: "New York Jets",        PHI: "Philadelphia Eagles",  PIT: "Pittsburgh Steelers",
+  SEA: "Seattle Seahawks",     SF:  "San Francisco 49ers",  TB:  "Tampa Bay Buccaneers",
+  TEN: "Tennessee Titans",     WAS: "Washington Commanders",
+};
+
+// Re-fetch the shared OurLads check log when the drawer opens if the last
+// fetch is older than this.
+const OL_CHECKS_MAX_AGE_MS = 60 * 1000;
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -105,6 +125,13 @@ const state = {
   warningFilter: "all",
   ourlads: null,
   transactions: null,    // docs/data/transactions.json (preferred over snapshot.transactions)
+
+  // OurLads update tracker (shared check log lives in the OurladsChecks tab).
+  olChecks: {},           // team -> { team, checked_at, checked_by, ourlads_updated_at, ourlads_updated_text }
+  olChecksFetchedAt: 0,   // ms timestamp of last successful list fetch
+  olChecksError: null,    // last fetch error message, if any
+  olFilter: "all",        // all | recheck | checked
+  olMarking: new Set(),   // teams with an in-flight "mark checked" request
 
   // Multi-user lock state.
   myLock: null,           // { team, owner_email, acquired_at, last_heartbeat_at }
@@ -202,10 +229,13 @@ async function launchApp() {
 
   // Compute and render warnings.
   rebuildWarnings();
+  updateOurladsBadge();
 
   // Multi-user: poll lock state, start a heartbeat for any lock we hold, and
   // warn the user before they leave with unsynced edits.
   await refreshLocks();
+  // Shared OurLads check log — not awaited; the badge fills in when it lands.
+  refreshOurladsChecks();
   setInterval(refreshLocks, LOCKS_POLL_MS);
   setInterval(heartbeatTick, LOCK_HEARTBEAT_MS);
   window.addEventListener("beforeunload", onBeforeUnload);
@@ -353,6 +383,24 @@ function renderShell() {
     if (!btn) return;
     state.warningFilter = btn.dataset.filter || "all";
     renderWarnings();
+  });
+
+  // OurLads tracker drawer handlers.
+  document.getElementById("ourlads-toggle").addEventListener("click", () => openOurladsPanel(true));
+  document.getElementById("ourlads-close").addEventListener("click", () => openOurladsPanel(false));
+  document.getElementById("ourlads-scrim").addEventListener("click", () => openOurladsPanel(false));
+  document.getElementById("ourlads-refresh").addEventListener("click", refreshOurladsTracker);
+  document.getElementById("ourlads-filters").addEventListener("click", (e) => {
+    const btn = e.target.closest("button.chip");
+    if (!btn) return;
+    state.olFilter = btn.dataset.filter || "all";
+    renderOurladsPanel();
+  });
+  document.getElementById("ourlads-list").addEventListener("click", (e) => {
+    const nav = e.target.closest("button[data-nav]");
+    if (nav) { navigateToTeam(nav.dataset.nav); openOurladsPanel(false); return; }
+    const mark = e.target.closest("button[data-mark]");
+    if (mark && !mark.disabled) markOurladsChecked(mark.dataset.mark);
   });
 }
 
@@ -1893,15 +1941,17 @@ function renderSourceFreshness() {
     }
   }
   if (olEl) {
-    if (!state.ourlads || !state.ourlads.rows) {
+    const teams = state.ourlads && state.ourlads.teams;
+    if (!teams) {
       olEl.textContent = "OurLads: no snapshot loaded.";
       olEl.className = "muted";
     } else {
       const generated = state.ourlads.generated_at;
       const days = generated ? Math.floor((Date.now() - new Date(generated).getTime()) / 86400000) : null;
+      const nPlayers = Object.values(teams).reduce((n, arr) => n + (Array.isArray(arr) ? arr.length : 0), 0);
       olEl.textContent =
-        `OurLads: ${state.ourlads.rows.length} rows` +
-        (generated ? `, generated ${days}d ago` : "");
+        `OurLads: ${nPlayers} players across ${Object.keys(teams).length} teams` +
+        (generated ? `, scraped ${_fmtAgo(generated)}` : "");
       olEl.className = days !== null && days > 7 ? "stale" : "muted";
     }
   }
@@ -1930,6 +1980,8 @@ async function refreshExternalSources() {
     if (fresh_tx) { state.transactions = fresh_tx; n++; }
     if (fresh_ol) { state.ourlads = fresh_ol; n++; }
     rebuildWarnings();
+    updateOurladsBadge();
+    renderOurladsPanel();
     const active = state.warnings.filter(w => !state.dismissedWarningIds.has(w.id)).length;
     toast(`Sources refreshed (${n}/2). ${active} active warning${active === 1 ? "" : "s"}.`, 3500);
   } catch (err) {
@@ -2128,6 +2180,283 @@ function restoreDismissedWarnings() {
     if (!raw) return;
     state.dismissedWarningIds = new Set(JSON.parse(raw) || []);
   } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// OurLads update tracker
+// ---------------------------------------------------------------------------
+//
+// OurLads prints "Updated: MM/DD/YYYY H:MMPM ET" at the top of every team
+// page. The hourly scrape stores it in ourlads.json as `updates[team]` =
+// { text, iso }. The Apps Script keeps an `OurladsChecks` tab recording who
+// on our side last reviewed each team and which OurLads stamp they saw. A
+// team "needs re-check" when OurLads' stamp is newer than our last check —
+// or when nobody has checked it yet.
+
+function _olUpdates() {
+  return (state.ourlads && state.ourlads.updates) || {};
+}
+
+function _olTeamName(abbr) {
+  return OL_TEAM_NAMES[abbr] || abbr;
+}
+
+function _olTeams() {
+  // Every team in the chart except FA, plus anything OurLads knows that the
+  // chart doesn't (shouldn't happen; don't hide data if it does).
+  const set = new Set(teamList().filter((t) => t !== FA_TEAM));
+  for (const t of Object.keys(_olUpdates())) set.add(t);
+  return [...set].sort((a, b) => _olTeamName(a).localeCompare(_olTeamName(b)));
+}
+
+// → "recheck" | "checked" | "unknown"
+function olTeamStatus(team) {
+  const upd = _olUpdates()[team];
+  const chk = state.olChecks[team];
+  if (!chk || !chk.checked_at) return "recheck";            // never reviewed
+  if (!upd || !upd.iso) return "unknown";                     // no comparable stamp
+  // Exact stamp match beats clock comparison (robust to skew / future stamps).
+  if (chk.ourlads_updated_at && chk.ourlads_updated_at === upd.iso) return "checked";
+  const u = Date.parse(upd.iso);
+  const c = Date.parse(chk.checked_at);
+  if (!Number.isFinite(u) || !Number.isFinite(c)) return "unknown";
+  return u > c ? "recheck" : "checked";
+}
+
+function olCountRecheck() {
+  return _olTeams().filter((t) => olTeamStatus(t) === "recheck").length;
+}
+
+function updateOurladsBadge() {
+  const btn = document.getElementById("ourlads-toggle");
+  const count = document.getElementById("ourlads-count");
+  if (!btn || !count) return;
+  btn.style.display = "inline-flex";
+  const n = olCountRecheck();
+  count.textContent = String(n);
+  btn.classList.toggle("has-active", n > 0);
+  btn.title = n > 0
+    ? `OurLads tracker — ${n} team${n === 1 ? "" : "s"} changed on OurLads since last checked`
+    : "OurLads tracker — every team reviewed since its last OurLads update";
+}
+
+async function refreshOurladsChecks() {
+  const url = getSyncUrl();
+  if (!url) {
+    state.olChecksError = "No Apps Script URL configured (Settings ⚙).";
+    updateOurladsBadge();
+    renderOurladsPanel();
+    return;
+  }
+  try {
+    const qs = "?action=listOurladsChecks&id_token=" + encodeURIComponent(state.idToken || "");
+    const resp = await fetch(url + qs, { redirect: "follow" });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const body = await resp.json();
+    if (!body || !body.ok) throw new Error(formatSyncError(body));
+    const map = {};
+    for (const c of body.checks || []) {
+      if (c && c.team) map[String(c.team).trim().toUpperCase()] = c;
+    }
+    state.olChecks = map;
+    state.olChecksFetchedAt = Date.now();
+    state.olChecksError = null;
+  } catch (err) {
+    console.warn("refreshOurladsChecks failed:", err);
+    state.olChecksError = err.message || String(err);
+  }
+  updateOurladsBadge();
+  renderOurladsPanel();
+}
+
+async function markOurladsChecked(team) {
+  if (!team || state.olMarking.has(team)) return;
+  const upd = _olUpdates()[team] || {};
+  state.olMarking.add(team);
+  renderOurladsPanel();
+  try {
+    const resp = await _postToSync({
+      action: "markOurladsChecked",
+      team,
+      ourlads_updated_at: upd.iso || "",
+      ourlads_updated_text: upd.text || "",
+    });
+    if (!resp || !resp.ok || !resp.check) throw new Error(formatSyncError(resp));
+    state.olChecks[team] = resp.check;
+    toast(`${_olTeamName(team)} marked checked.`, 2500);
+  } catch (err) {
+    toast(`Couldn't mark ${team} checked: ${err.message || err}`, 6000);
+  } finally {
+    state.olMarking.delete(team);
+    updateOurladsBadge();
+    renderOurladsPanel();
+  }
+}
+
+async function refreshOurladsTracker() {
+  const btn = document.getElementById("ourlads-refresh");
+  if (btn) { btn.disabled = true; btn.textContent = "Refreshing…"; }
+  try {
+    const fresh = await tryFetchJSON("./data/ourlads.json?cb=" + Date.now());
+    if (fresh) {
+      state.ourlads = fresh;
+      rebuildWarnings();
+    }
+    await refreshOurladsChecks();
+  } catch (err) {
+    toast("Refresh failed: " + (err.message || err), 6000);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Refresh"; }
+  }
+}
+
+function openOurladsPanel(open) {
+  const panel = document.getElementById("ourlads-panel");
+  const scrim = document.getElementById("ourlads-scrim");
+  if (!panel || !scrim) return;
+  panel.classList.toggle("is-open", !!open);
+  scrim.classList.toggle("is-open", !!open);
+  panel.setAttribute("aria-hidden", open ? "false" : "true");
+  scrim.setAttribute("aria-hidden", open ? "false" : "true");
+  if (open) {
+    renderOurladsPanel();
+    if (Date.now() - state.olChecksFetchedAt > OL_CHECKS_MAX_AGE_MS) refreshOurladsChecks();
+  }
+}
+
+// Read-only navigation to a team (no lock), same contract as navigateToRow.
+function navigateToTeam(team) {
+  if (!team || !teamList().includes(team)) return;
+  if (team !== state.currentTeam) commitTeamSwitch(team);
+  const sel = document.getElementById("team-select");
+  if (sel) sel.value = team;
+}
+
+function renderOurladsPanel() {
+  const list = document.getElementById("ourlads-list");
+  if (!list) return;
+
+  // Source freshness lines.
+  const scrapeEl = document.getElementById("ourlads-src-scrape");
+  const checksEl = document.getElementById("ourlads-src-checks");
+  const ol = state.ourlads;
+  if (scrapeEl) {
+    if (!ol) {
+      scrapeEl.textContent = "OurLads scrape: not loaded.";
+      scrapeEl.className = "stale";
+    } else {
+      const n = Object.keys(_olUpdates()).length;
+      const ageMs = ol.generated_at ? Date.now() - Date.parse(ol.generated_at) : NaN;
+      scrapeEl.textContent =
+        `OurLads scrape: ${n} team stamp${n === 1 ? "" : "s"}` +
+        (ol.generated_at ? `, scraped ${_fmtAgo(ol.generated_at)}` : "") +
+        (n === 0 ? " — file predates stamp capture; wait for the next hourly scrape" : "");
+      // Hourly cron → anything past ~3h means the workflow is stuck.
+      scrapeEl.className = Number.isFinite(ageMs) && ageMs > 3 * 3600 * 1000 ? "stale" : "muted";
+    }
+  }
+  if (checksEl) {
+    if (state.olChecksError) {
+      checksEl.textContent = "Check log: " + state.olChecksError;
+      checksEl.className = "stale";
+    } else if (!state.olChecksFetchedAt) {
+      checksEl.textContent = "Check log: loading…";
+      checksEl.className = "muted";
+    } else {
+      const n = Object.keys(state.olChecks).length;
+      checksEl.textContent =
+        `Check log: ${n} team${n === 1 ? "" : "s"} on record, fetched ${_fmtAgo(new Date(state.olChecksFetchedAt).toISOString())}`;
+      checksEl.className = "muted";
+    }
+  }
+
+  // Filter chip active state.
+  for (const chip of document.querySelectorAll("#ourlads-filters .chip")) {
+    chip.classList.toggle("chip--active", (chip.dataset.filter || "all") === state.olFilter);
+  }
+
+  const teams = _olTeams().filter((t) => {
+    const s = olTeamStatus(t);
+    if (state.olFilter === "recheck") return s === "recheck";
+    if (state.olFilter === "checked") return s !== "recheck";
+    return true;
+  });
+  if (!teams.length) {
+    list.innerHTML = `<div class="warnings-empty">${
+      state.olFilter === "recheck" ? "Every team has been reviewed since its last OurLads update." : "Nothing to show."
+    }</div>`;
+    return;
+  }
+
+  const canMark = !!getSyncUrl() && !!state.idToken;
+  const markTitle = canMark
+    ? "Record that you just reviewed this team against OurLads"
+    : "Sign in and configure the Apps Script URL (Settings ⚙) to record checks";
+
+  const rows = teams.map((t) => {
+    const s = olTeamStatus(t);
+    const upd = _olUpdates()[t];
+    const chk = state.olChecks[t];
+    const marking = state.olMarking.has(t);
+
+    const updCell = upd && upd.text
+      ? `<span class="ol-stamp" title="${escapeHTML(upd.iso || "unparsed")}">${escapeHTML(upd.text)}</span>`
+      : `<span class="muted">—</span>`;
+    const chkCell = chk && chk.checked_at
+      ? `<span class="ol-stamp" title="${escapeHTML(chk.checked_at)}">${escapeHTML(_fmtLocal(chk.checked_at))}</span>` +
+        `<span class="ol-ago">${escapeHTML(_fmtAgo(chk.checked_at))}</span>`
+      : `<span class="muted">never</span>`;
+    const byCell = chk && chk.checked_by
+      ? `<span title="${escapeHTML(chk.checked_by)}">${escapeHTML(_shortEmail(chk.checked_by))}</span>`
+      : `<span class="muted">—</span>`;
+    const label = marking ? "Saving…" : (s === "recheck" ? "Mark checked" : "Re-check");
+
+    return `<tr class="ol-row ol-row--${s}" data-team="${escapeHTML(t)}">
+      <td class="ol-team">
+        <button type="button" class="ol-team-link" data-nav="${escapeHTML(t)}" title="Open ${escapeHTML(t)} in the editor">${escapeHTML(_olTeamName(t))}</button>
+        <span class="ol-abbr">${escapeHTML(t)}</span>
+      </td>
+      <td class="ol-upd">${updCell}</td>
+      <td class="ol-chk">${chkCell}</td>
+      <td class="ol-by">${byCell}</td>
+      <td class="ol-act">
+        <button type="button" class="btn ${s === "recheck" ? "btn--primary" : "btn--ghost"} ol-mark" data-mark="${escapeHTML(t)}" ${canMark && !marking ? "" : "disabled"} title="${escapeHTML(markTitle)}">${label}</button>
+      </td>
+    </tr>`;
+  }).join("");
+
+  list.innerHTML = `
+    <table class="ol-table">
+      <thead><tr>
+        <th>Team</th>
+        <th>OurLads updated (ET)</th>
+        <th>Last checked</th>
+        <th>By</th>
+        <th></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function _fmtLocal(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso || "");
+  return d.toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function _fmtAgo(iso) {
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return "";
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function _shortEmail(email) {
+  return String(email || "").split("@")[0];
 }
 
 // ---------------------------------------------------------------------------

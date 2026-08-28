@@ -94,8 +94,9 @@ in sync; both are enforced.
 
 ### 5. Multi-user safeguards — Locks + AuditLog tabs
 
-The Apps Script web app now persists two sidecar tabs on the same
-workbook:
+The Apps Script web app persists three sidecar tabs on the same
+workbook (the third, `OurladsChecks`, is described in
+[§6](#6-ourlads-update-tracker)):
 
 - **`Locks`** — one row per actively-edited team (FA never locks). Columns:
   `team | owner_email | acquired_at | last_heartbeat_at`. Rows are created /
@@ -107,9 +108,10 @@ workbook:
   The `actor_email` is **always** `Session.getActiveUser().getEmail()` — the
   browser cannot spoof it. Actions: `edit`, `append`, `lock_acquired`,
   `lock_released`, `lock_stolen`, `lock_acquired_after_steal`, `force_release`,
-  and `cli_bypass` / `cli_bypass_append` from `tools/sync_to_sheet.py`.
+  `ourlads_checked`, and `cli_bypass` / `cli_bypass_append` from
+  `tools/sync_to_sheet.py`.
 
-Both tabs are auto-created on first use (you don't need to seed them).
+All sidecar tabs are auto-created on first use (you don't need to seed them).
 You can hand-edit `Locks` to clear a stuck row — the Apps Script reads it
 fresh on every request.
 
@@ -130,6 +132,30 @@ fresh on every request.
   writes `cli_bypass` rows to `AuditLog` so out-of-band writes are still
   attributable.
 
+### 6. OurLads update tracker
+
+OurLads prints `Updated: MM/DD/YYYY H:MMPM ET` at the top of every team
+depth-chart page. The **OL** button in the top bar opens a drawer listing
+all 32 teams with:
+
+| Column | Source |
+| ------ | ------ |
+| **OurLads updated (ET)** | The page stamp, verbatim, captured by `tools/pull_ourlads.py` into `docs/data/ourlads.json` → `updates[team] = { text, iso }`. The `Scrape OurLads` workflow runs **hourly** (`:07`). |
+| **Last checked / By** | When one of *us* last reviewed that team against OurLads. Stored in the **`OurladsChecks`** sidecar tab (`team \| checked_at \| checked_by \| ourlads_updated_at \| ourlads_updated_text`), one row per team. |
+
+Click **Mark checked** after you've reviewed a team; `checked_by` is the
+server-verified caller email (the browser can't set it), and an
+`ourlads_checked` row lands in `AuditLog`. A team turns **amber** when
+OurLads' stamp is newer than our last check — or nobody has checked it
+yet — and **green** once someone marks it again. The top-bar badge counts
+the amber teams. Marking does **not** require holding the team's edit lock.
+
+Apps Script actions: `listOurladsChecks` (GET or POST, auth-gated like
+`listLocks`) and `markOurladsChecked` (POST `{ team, ourlads_updated_at,
+ourlads_updated_text }`). Both require the caller to be on
+`EDITOR_ALLOWLIST`. After changing `sync.gs`, redeploy a new version
+(see `apps_script/README.md`).
+
 ---
 
 ## Local development
@@ -143,7 +169,12 @@ pip install -r tools/requirements.txt
 python tools/pull_snapshot.py
 # -> writes docs/data/snapshot.json
 
-# 3. Serve docs/ with any static server
+# 3. (Optional) refresh the OurLads scrape + "Updated" stamps
+pip install requests beautifulsoup4 tzdata   # tzdata: zoneinfo on Windows
+python tools/pull_ourlads.py
+# -> writes docs/data/ourlads.json
+
+# 4. Serve docs/ with any static server
 cd docs && python -m http.server 8000
 # -> http://localhost:8000
 ```
@@ -207,6 +238,8 @@ flow:
 - Edits persist to `localStorage`; "Discard edits" clears them.
 - Two export buttons: full edited CSV, diff/log JSON.
 - Placeholder IDs (`ROOKIE###`) are visibly flagged.
+- OurLads update tracker: per-team OurLads "Updated" stamp vs. when one of
+  us last checked it, with a shared "Mark checked" log (see §6 above).
 
 ## What it does NOT do
 

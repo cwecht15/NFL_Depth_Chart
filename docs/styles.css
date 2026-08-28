@@ -958,6 +958,92 @@ select { min-width: 100px; }
   animation: flash-highlight 1.6s ease 2;
 }
 
+/* --- OurLads update tracker --------------------------------------------- */
+
+.ourlads-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: rgba(92, 184, 156, 0.5);
+  color: #6fcfa9;
+}
+.ourlads-toggle:hover {
+  background: #5cb89c;
+  color: #1a1a2e;
+}
+.ourlads-toggle.has-active {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #1a1a2e;
+  font-weight: 700;
+}
+.ourlads-toggle__icon {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+/* Wider than the warnings drawer: five columns. */
+.ourlads-panel { width: min(760px, 100vw); }
+
+.ol-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.ol-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-secondary);
+  text-align: left;
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.ol-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+}
+.ol-row td:first-child { border-left: 3px solid var(--border-primary); }
+.ol-row--recheck { background: rgba(240, 173, 78, 0.08); }
+.ol-row--recheck td:first-child { border-left-color: var(--warn); }
+.ol-row--checked td:first-child { border-left-color: var(--success); }
+.ol-row:hover { background: var(--bg-row-hover); }
+
+.ol-team-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text-heading);
+  cursor: pointer;
+  text-align: left;
+}
+.ol-team-link:hover { color: var(--accent); text-decoration: underline; }
+.ol-abbr {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--text-muted);
+}
+.ol-stamp { font-family: var(--font-mono); white-space: nowrap; }
+.ol-ago {
+  display: block;
+  font-size: 0.66rem;
+  color: var(--text-muted);
+}
+.ol-by { word-break: break-all; }
+.ol-act { text-align: right; white-space: nowrap; }
+.ol-mark { font-size: 0.72rem; padding: 4px 10px; }
+.ol-mark:disabled { opacity: 0.5; cursor: not-allowed; }
+
 @keyframes flash-highlight {
   0%, 100% { background: transparent; }
   35% { background: rgba(240, 173, 78, 0.20); }
