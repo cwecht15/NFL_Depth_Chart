@@ -178,12 +178,16 @@ def read_target_tab(svc, tab: str) -> dict[str, Any]:
 def compute_diff(
     export: dict[str, Any],
     target: dict[str, Any],
-) -> tuple[list[tuple[int, list[tuple[int, str]]]], list[dict]]:
-    """Return (updates, appends).
+) -> tuple[list[tuple[int, list[tuple[int, str]]]], list[dict], list[dict]]:
+    """Return (updates, appends, stale).
 
     - updates: list of (sheet_row, [(col_idx, value), ...]) for existing rows
       whose manual columns differ from the desired state.
-    - appends: full export rows whose _sheet_row doesn't exist in target.
+    - appends: full export rows the browser added itself (virtual ids).
+    - stale: export rows whose _sheet_row no longer holds the player the
+      browser loaded (rows were inserted/deleted in the sheet since the
+      export's snapshot), or is now blank/past the end of the tab. Writing
+      these would land on the wrong player, so the caller must refuse.
     """
     key_to_col: dict[str, int] = target["key_to_col"]
     formula_cols: set[int] = target["formula_cols"]
@@ -196,6 +200,7 @@ def compute_diff(
 
     updates: list[tuple[int, list[tuple[int, str]]]] = []
     appends: list[dict] = []
+    stale: list[dict] = []
 
     max_existing = max(current.keys(), default=0)
     new_row_threshold = max(max_existing + 1, 10000)
@@ -203,10 +208,19 @@ def compute_diff(
     for row in export.get("rows", []):
         sheet_row = int(row.get("_sheet_row") or 0)
         is_virtual = sheet_row >= new_row_threshold
-        if is_virtual or sheet_row not in current:
+        if is_virtual:
             appends.append(row)
             continue
+        if sheet_row not in current:
+            stale.append({"row": sheet_row, "team": row.get("team", ""),
+                          "expected": _identity_label(row.get("_identity") or row), "found": ""})
+            continue
         target_row = current[sheet_row]
+        if not _row_identity_matches(row, target_row):
+            stale.append({"row": sheet_row, "team": row.get("team", ""),
+                          "expected": _identity_label(row.get("_identity") or row),
+                          "found": _identity_label(target_row)})
+            continue
         diffs: list[tuple[int, str]] = []
         for key, col in writable.items():
             desired = row.get(key, "")
@@ -226,7 +240,44 @@ def compute_diff(
         if diffs:
             updates.append((sheet_row, diffs))
 
-    return updates, appends
+    return updates, appends, stale
+
+
+IDENTITY_KEYS = ("gsisId", "nflId", "eliasId", "displayName")
+
+
+def _cell_str(v: Any) -> str:
+    if v is None:
+        return ""
+    if v is True:
+        return "TRUE"
+    if v is False:
+        return "FALSE"
+    return str(v)
+
+
+def _row_identity_matches(row: dict, target_row: dict) -> bool:
+    """Mirror of sync.gs `_rowIdentityMatches`: the export's baseline identity
+    (``_identity``, or the row itself for older exports) must agree with the
+    sheet on at least one non-empty identity field."""
+    base = row.get("_identity") if isinstance(row.get("_identity"), dict) else row
+    comparable = 0
+    for k in IDENTITY_KEYS:
+        a = _cell_str(base.get(k)).strip().lower()
+        b = _cell_str(target_row.get(k)).strip().lower()
+        if not a or not b:
+            continue
+        comparable += 1
+        if a == b:
+            return True
+    return comparable == 0
+
+
+def _identity_label(rec: dict) -> str:
+    name = _cell_str(rec.get("displayName")).strip()
+    ident = (_cell_str(rec.get("gsisId")).strip() or _cell_str(rec.get("nflId")).strip()
+             or _cell_str(rec.get("eliasId")).strip())
+    return f"{name} [{ident}]" if ident else name
 
 
 def apply_updates(svc, tab: str, updates: list[tuple[int, list[tuple[int, str]]]]) -> int:
@@ -400,7 +451,15 @@ def main() -> int:
     print(f"Target formula columns (skipped): {len(target['formula_cols'])}")
     print(f"Target data rows currently: {len(target['current'])}\n")
 
-    updates, appends = compute_diff(export, target)
+    updates, appends, stale = compute_diff(export, target)
+    if stale:
+        print(f"REFUSED: {len(stale)} export row(s) no longer match the player at that sheet row "
+              f"(rows were inserted/deleted in '{args.tab}' since the export's snapshot). "
+              f"Re-export from a freshly refreshed editor and try again.")
+        for s_ in stale[:10]:
+            print(f"  row {s_['row']} ({s_['team']}): expected {s_['expected'] or '-'}, "
+                  f"sheet has {s_['found'] or 'blank'}")
+        return 2
 
     total_cells = sum(len(c) for _, c in updates)
     print(f"Updates: {len(updates)} rows ({total_cells} cells)")

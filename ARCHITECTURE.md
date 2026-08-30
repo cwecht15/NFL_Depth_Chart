@@ -278,6 +278,42 @@ browser path is the daily driver; the CLI is a fallback when the Apps
 Script deployment isn't available or when an operator wants to inspect a
 larger dry-run.
 
+### Row-identity (staleness) gate
+
+Every row is keyed by its **sheet row number** (`_sheet_row`), and the
+browser sends *all* rows on every sync. That only holds together if nobody
+inserts or deletes rows in `DepthCharts` while an editor session is open —
+which is exactly what happened on 2026-08-29 (48 duplicate/cut rows deleted
+by hand in the sheet shifted every row below by up to 48; a teammate's PIT
+drop then diffed as "changes" on 27 teams and was refused by the lock gate).
+
+Both write paths now verify identity before diffing:
+
+- The browser attaches `_identity` (`gsisId`, `nflId`, `eliasId`,
+  `displayName` **as loaded** — the baseline, so in-session edits to those
+  fields don't trip it) to every real row in the payload.
+- `sync.gs` `_computeDiff` / CLI `compute_diff` compare that against the row
+  currently at that sheet row. Any one agreeing non-empty field passes; a row
+  that disagrees on all of them, or whose row number is now blank / past the
+  end of the tab, is **stale**. One stale row refuses the whole sync
+  (`error: "stale_snapshot"`, CLI exit 2) — nothing is written and nothing is
+  appended. (Previously a real row number missing from the tab was silently
+  *appended*, i.e. duplicated.)
+- Rows the browser added itself (virtual ids ≥ 100000) are exempt and are
+  appended as before.
+
+Client-side, each edit-log entry carries the same baseline identity
+(`ident`). `applyEditsToRows()` — run on page load, on Refresh, and now
+automatically **before every Sync dry-run** (the sync pulls a live snapshot
+first) — discards any edit whose row no longer holds that player and toasts
+the discarded names. It also rebuilds virtual rows from their edit log so a
+refresh no longer drops a newly added player.
+
+Operationally: **don't insert/delete rows in `DepthCharts` while anyone has
+the editor open.** Drop players through the editor (team → FA), which keeps
+row numbers stable. If a re-row is unavoidable, editors should Refresh and
+redo pending edits afterwards.
+
 ## Multi-user safeguards
 
 Three sidecar tabs persist shared state on the same workbook:
@@ -417,3 +453,12 @@ identity, never a body field.
 | OurLads workflow exit code 2 | All scrapes returned 0 players | Open the workflow log; usually OurLads changed their table markup |
 | OurLads tracker shows "0 team stamps" / every "OurLads updated" cell is `—` | `ourlads.json` predates stamp capture, or OurLads renamed the `ctl00_phContent_DateUpd` div | Wait for the next hourly run; if `failures` lists "no 'Updated:' stamp", update `UPDATED_DIV_ID` in `tools/pull_ourlads.py` |
 | Tracker says "Check log: … not_authorized" / "sign_in_required" | Apps Script not redeployed with the `OurladsChecks` actions, or caller not on `EDITOR_ALLOWLIST` | Redeploy `sync.gs` as a new version; check the allowlist |
+
+- **"Sync refused — the sheet's rows have moved since you loaded"**
+  (`stale_snapshot`): rows were inserted/deleted in `DepthCharts` after your
+  browser loaded. Click Refresh (edits whose rows moved are discarded with a
+  toast), then redo those edits and sync again. See "Row-identity
+  (staleness) gate" above.
+- **"Sync refused — teams not locked by you: <long list>"** on an edit to a
+  single team: on an Apps Script deployment older than the staleness gate,
+  this is the symptom of the same row shift. Redeploy `sync.gs`.

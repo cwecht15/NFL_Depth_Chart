@@ -26,6 +26,8 @@ const SPREADSHEET_ID    = "1XHXiR__p7h2JVLKNkS-F9aiKZjhar78YubQklW_baQA";
 // "Copy of DepthCharts" staging tab is no longer the default but can be
 // targeted explicitly via Settings → Target tab if you want a sandbox.
 const DEFAULT_TARGET_TAB = "DepthCharts";
+// Bump when redeploying so `GET <exec-url>` shows which build is live.
+const SCRIPT_VERSION = "2026-08-30-identity-gate";
 
 // Row 4 of the target tab carries cell notes that name the JSON key for
 // each column. Row 5 is the first data row.
@@ -126,6 +128,7 @@ function doGet(e) {
   return _json({
     ok: true,
     service: "DepthChart sync",
+    version: SCRIPT_VERSION,
     spreadsheet_id: SPREADSHEET_ID,
     default_target_tab: DEFAULT_TARGET_TAB,
     time: new Date().toISOString(),
@@ -204,7 +207,23 @@ function handleSync(payload, actorEmail) {
   const rows = Array.isArray(payload.rows) ? payload.rows : [];
   const target = _readTargetTab(sheet);
 
-  const { updates, appends } = _computeDiff(rows, target);
+  const { updates, appends, stale } = _computeDiff(rows, target);
+
+  // Staleness gate: the client keys every row by sheet row number. If rows
+  // were inserted/deleted in the sheet after the client loaded, those numbers
+  // now point at different players and a "diff" would write stale values
+  // into the wrong rows. Refuse outright — the fix is a refresh, not a lock.
+  if (stale.length > 0) {
+    return {
+      ok: false,
+      error: "stale_snapshot",
+      message: "The sheet's rows have moved since you loaded (rows were " +
+               "added or deleted in DepthCharts). Refresh and re-apply your edits.",
+      stale_count: stale.length,
+      sample_stale: stale.slice(0, 8),
+      snapshot_at: payload.snapshot_at || null,
+    };
+  }
 
   // Lock gate: every distinct team touched by either an update or an append
   // (FA excluded) must be locked by the caller. Dry-runs are gated too so
@@ -468,19 +487,27 @@ function _computeDiff(rows, target) {
 
   const updates = [];
   const appends = [];
+  const stale   = [];
+  // The browser allocates ids >= 100000 for rows it added itself; anything
+  // below that is a real sheet row number the client loaded from a snapshot.
   const newRowThreshold = Math.max(target.highestDataRow + 10000, 100000);
 
   for (const row of rows) {
     const sr = Number(row._sheet_row) || 0;
-    const isNew = (sr >= newRowThreshold) || (sr > target.highestDataRow);
-    if (isNew) {
+    if (sr >= newRowThreshold) {
       appends.push(row);
       continue;
     }
     const cur = target.current[sr];
     if (!cur) {
-      // Row marked existing but not present in target tab — treat as append.
-      appends.push(row);
+      // A real row number the client loaded that is now blank or beyond the
+      // end of the tab: rows were deleted underneath the client. Appending it
+      // would duplicate the player somewhere else, so flag it instead.
+      stale.push({ row: sr, team: _normalizeTeam(row.team), expected: _toCellString(row.displayName), found: "" });
+      continue;
+    }
+    if (!_rowIdentityMatches(row, cur)) {
+      stale.push({ row: sr, team: _normalizeTeam(row.team), expected: _identityLabel(row._identity || row), found: _identityLabel(cur) });
       continue;
     }
     for (const key of Object.keys(writable)) {
@@ -496,7 +523,38 @@ function _computeDiff(rows, target) {
     }
   }
 
-  return { updates, appends };
+  return { updates, appends, stale };
+}
+
+// Is the sheet row the client thinks it's editing still the same player?
+//
+// The client sends `_identity` per row = the identity fields as they were
+// when it loaded the row (its baseline), so a legitimate edit to gsisId or
+// displayName in the same session doesn't trip the check. Older clients omit
+// it; fall back to the row's current values. Any one agreeing non-empty field
+// is enough — ids are occasionally corrected, names occasionally reformatted,
+// but a wholesale different player disagrees on all of them.
+const IDENTITY_KEYS = ["gsisId", "nflId", "eliasId", "displayName"];
+
+function _rowIdentityMatches(row, cur) {
+  const base = (row._identity && typeof row._identity === "object") ? row._identity : row;
+  let comparable = 0;
+  for (const k of IDENTITY_KEYS) {
+    const a = _toCellString(base[k]).trim().toLowerCase();
+    const b = String(cur[k] === undefined ? "" : cur[k]).trim().toLowerCase();
+    if (!a || !b) continue;
+    comparable++;
+    if (a === b) return true;
+  }
+  // Nothing to compare on either side (fully blank identity) — can't call it
+  // stale, let the value diff decide.
+  return comparable === 0;
+}
+
+function _identityLabel(rec) {
+  const name = _toCellString(rec.displayName).trim();
+  const id = _toCellString(rec.gsisId).trim() || _toCellString(rec.nflId).trim() || _toCellString(rec.eliasId).trim();
+  return name + (id ? " [" + id + "]" : "");
 }
 
 function _applyUpdates(sheet, updates) {

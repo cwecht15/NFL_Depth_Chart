@@ -933,6 +933,7 @@ function performReorder(sourceSheetRow, targetSheetRow, placeAbove) {
         after: after,
         ts: now,
         who: state.authedEmail || "anon",
+        ident: editIdentity(slotRow),
       });
       cellsChanged++;
     }
@@ -978,6 +979,7 @@ function recordEdit(row, key, newValue) {
     after,
     ts: new Date().toISOString(),
     who: state.authedEmail || "anon",
+    ident: editIdentity(row),
   });
 
   // Moving a player off FA: every FA row in the snapshot has
@@ -1018,6 +1020,7 @@ function maybePromptCategoryUpgrade(row) {
     after: suggested,
     ts: new Date().toISOString(),
     who: state.authedEmail || "anon",
+    ident: editIdentity(row),
   });
 }
 
@@ -1076,15 +1079,74 @@ function restoreEditsFromLocalStorage() {
   }
 }
 
+// Identity of the player a row held when it was loaded (the baseline), so an
+// edit log entry can later be checked against whatever row now sits at that
+// sheet row number. Rows are keyed by row number, and row numbers move when
+// someone inserts/deletes rows in the sheet — without this, a persisted edit
+// replayed after such a shift would silently land on a different player.
+function editIdentity(row) {
+  const base = state.baseline.get(row._sheet_row) || row;
+  return {
+    gsisId: String(base.gsisId ?? "").trim(),
+    displayName: String(base.displayName ?? "").trim(),
+  };
+}
+
+function identityMatchesRow(ident, row) {
+  if (!ident) return true;                     // pre-identity edit log entry
+  const gsis = String(row.gsisId ?? "").trim();
+  const name = String(row.displayName ?? "").trim();
+  if (ident.gsisId && gsis) return ident.gsisId === gsis;
+  if (ident.displayName && name) return ident.displayName.toLowerCase() === name.toLowerCase();
+  return true;                                  // nothing comparable
+}
+
+function isVirtualSheetRow(sr) {
+  return Number(sr) >= 100000;
+}
+
 function applyEditsToRows() {
   // Rebuild state.editedRowKeys from logs, applying values to live rows.
+  //
+  // Two guards:
+  //  * Rows the browser added itself (virtual ids >= 100000) don't exist in a
+  //    freshly loaded snapshot — rebuild them from their edit log so a refresh
+  //    or reload doesn't silently drop a newly added player.
+  //  * An edit whose identity no longer matches the row at that sheet row
+  //    number (the sheet was re-rowed underneath us) is discarded and reported
+  //    rather than applied to the wrong player.
   state.editedRowKeys.clear();
   const byRow = new Map(state.rows.map(r => [r._sheet_row, r]));
+  const keys = (state.snapshot && state.snapshot.depth && state.snapshot.depth.keys) || [];
+  const stale = [];
+  const kept = [];
   for (const e of state.edits) {
-    const r = byRow.get(e.sheet_row);
-    if (!r) continue;
+    let r = byRow.get(e.sheet_row);
+    if (!r && isVirtualSheetRow(e.sheet_row)) {
+      r = { _sheet_row: e.sheet_row, _new: true };
+      for (const k of keys) r[k] = "";
+      state.rows.push(r);
+      byRow.set(e.sheet_row, r);
+    }
+    if (!r || !identityMatchesRow(e.ident, r)) {
+      stale.push(e);
+      continue;
+    }
     r[e.column] = e.after;
     state.editedRowKeys.add(e.sheet_row);
+    kept.push(e);
+  }
+  if (stale.length > 0) {
+    state.edits = kept;
+    persistEdits();
+    updateEditCount();
+    const who = [...new Set(stale.map(e => (e.ident && e.ident.displayName) || ("row " + e.sheet_row)))];
+    console.warn("Discarded stale edits (sheet rows moved):", stale);
+    toast(
+      `${stale.length} pending edit${stale.length === 1 ? "" : "s"} discarded — the sheet's rows moved ` +
+      `since they were made (${who.slice(0, 4).join(", ")}${who.length > 4 ? ", …" : ""}). Please redo them.`,
+      12000
+    );
   }
 }
 
@@ -1497,7 +1559,7 @@ function onAddPlayer() {
   ];
   for (const k of fields) {
     if (newRow[k] === "" || newRow[k] === undefined) continue;
-    state.edits.push({ sheet_row: newRow._sheet_row, column: k, before: "", after: newRow[k], ts, who: state.authedEmail || "anon" });
+    state.edits.push({ sheet_row: newRow._sheet_row, column: k, before: "", after: newRow[k], ts, who: state.authedEmail || "anon", ident: editIdentity(newRow) });
   }
   state.editedRowKeys.add(newRow._sheet_row);
   persistEdits();
@@ -1569,6 +1631,7 @@ function onAddCustomPlayer() {
       sheet_row: newRow._sheet_row, column: k,
       before: "", after: newRow[k], ts,
       who: state.authedEmail || "anon",
+      ident: editIdentity(newRow),
     });
   }
   state.editedRowKeys.add(newRow._sheet_row);
@@ -2559,6 +2622,16 @@ function _buildSyncPayload(extra) {
     for (const k of Object.keys(r)) {
       if (k === "_sheet_row" || !k.startsWith("_")) out[k] = r[k];
     }
+    // Baseline identity so the server can verify this sheet row still holds
+    // the player we loaded (rows move when someone inserts/deletes in the
+    // sheet). Virtual rows we added have no baseline and are appended anyway.
+    const base = state.baseline.get(r._sheet_row);
+    if (base && !isVirtualSheetRow(r._sheet_row)) {
+      out._identity = {
+        gsisId: base.gsisId ?? "", nflId: base.nflId ?? "",
+        eliasId: base.eliasId ?? "", displayName: base.displayName ?? "",
+      };
+    }
     return out;
   });
   rows.sort((a, b) => Number(a._sheet_row) - Number(b._sheet_row));
@@ -2664,6 +2737,19 @@ async function onSyncToSheet() {
     setSettingsStatus("Paste your Apps Script URL first, then try Sync again.", "error");
     return;
   }
+  // Pull the live sheet first and replay edits on top of it, so the diff is
+  // computed against what's actually there now. This catches sheet-side row
+  // inserts/deletes (edits whose rows moved are discarded with a toast) and
+  // means the preview reflects other people's changes since we loaded.
+  showSyncModal({ phase: "loading", message: "Refreshing from sheet…" });
+  await refreshSnapshot();
+  if (state.edits.length === 0) {
+    showSyncModal({
+      phase: "error",
+      message: "No edits left to sync — your pending edits were discarded because the sheet's rows moved since you made them. Please redo them.",
+    });
+    return;
+  }
   showSyncModal({ phase: "loading", message: "Computing dry-run preview…" });
   try {
     const preview = await _postToSync(_buildSyncPayload({ commit: false }));
@@ -2691,6 +2777,14 @@ function formatSyncError(resp) {
     if (missing) parts.push("teams not locked by you: " + missing);
     if (others)  parts.push("teams locked by others: " + others);
     return "Sync refused — " + (parts.join("; ") || "you don't hold the right locks.");
+  }
+  if (resp.error === "stale_snapshot") {
+    const sample = (resp.sample_stale || [])
+      .map((s) => `row ${s.row} (${s.team}): expected ${s.expected || "—"}, sheet has ${s.found || "blank"}`)
+      .join("; ");
+    return "Sync refused — the sheet's rows have moved since you loaded (" +
+      (resp.stale_count || "?") + " row" + (resp.stale_count === 1 ? "" : "s") + " no longer match" +
+      (sample ? ": " + sample : "") + "). Click Refresh, then redo your edits.";
   }
   if (resp.error === "sign_in_required") return "Sign-in token expired or missing. Sign out and back in.";
   if (resp.error === "not_authorized")   return "Your account (" + (resp.email || "unknown") + ") isn't on the Apps Script editor allowlist.";
