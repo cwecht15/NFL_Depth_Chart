@@ -49,6 +49,9 @@ const MANUAL_KEYS = new Set([
 const EDITOR_ALLOWLIST = [
   "cwecht8@gmail.com",
   "tbmoore2016@gmail.com",
+  "chriscashmusic@gmail.com",
+  "pitaroproductions@gmail.com",
+  "isaachoule30@gmail.com",
 ];
 
 // Admins who may call forceReleaseLock to clear someone else's lock without
