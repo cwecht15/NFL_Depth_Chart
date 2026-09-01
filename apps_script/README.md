@@ -84,16 +84,18 @@ authentication (expected with "Anyone with Google account").
 ## Actions
 
 Every POST body carries `action` (default `sync`) plus `id_token`. GET
-supports `?action=listLocks`, `?action=listOurladsChecks`, and
-`?action=whoami` (all with `&id_token=…`).
+supports `?action=listLocks`, `?action=listOurladsChecks`,
+`?action=listNameAliases`, and `?action=whoami` (all with `&id_token=…`).
 
 | Action | What it does | Sidecar tab |
 | ------ | ------------ | ----------- |
 | `sync` | Diff + (with `commit: true`) write manual cells; mirrors to `Roster_Info` | `AuditLog` |
 | `snapshot` | Read the live `DepthCharts` tab for the browser's "Refresh snapshot" | — |
-| `acquireLock` / `heartbeatLock` / `releaseLock` / `listLocks` / `forceReleaseLock` | Per-team edit locks | `Locks`, `AuditLog` |
+| `acquireLock` / `heartbeatLock` / `releaseLock` / `listLocks` / `forceReleaseLock` | Per-team edit locks. One editor may hold several teams; `heartbeatLock` accepts a `teams` array; `releaseLock` accepts `all: true` | `Locks`, `AuditLog` |
 | `listOurladsChecks` | Return every team's last "checked against OurLads" record | `OurladsChecks` |
 | `markOurladsChecked` | Upsert `{ team, checked_at: now, checked_by: <verified caller>, ourlads_updated_at, ourlads_updated_text }`; logs `ourlads_checked` | `OurladsChecks`, `AuditLog` |
+| `listNameAliases` | Return every OurLads-name → DepthCharts-name alias | `NameAliases` |
+| `addNameAlias` | Upsert `{ ourlads_name, sheet_name, created_at: now, created_by: <verified caller> }` keyed by normalized OurLads name; logs `alias_added`. Delete a row by hand to retire an alias | `NameAliases`, `AuditLog` |
 
 ## Updating the script
 

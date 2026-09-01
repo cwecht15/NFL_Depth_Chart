@@ -12,9 +12,10 @@
  * appending any new rows. The live "DepthCharts" tab is gated behind an
  * explicit `allow_prod` flag.
  *
- * It also owns three sidecar tabs on the same workbook: `Locks` (per-team
- * edit locks), `AuditLog` (append-only history), and `OurladsChecks` (who
- * last reviewed each team against OurLads, and when).
+ * It also owns four sidecar tabs on the same workbook: `Locks` (per-team
+ * edit locks), `AuditLog` (append-only history), `OurladsChecks` (who last
+ * reviewed each team against OurLads, and when), and `NameAliases` (OurLads
+ * spellings mapped to DepthCharts player names).
  *
  * SEE apps_script/README.md FOR DEPLOYMENT.
  */
@@ -27,7 +28,7 @@ const SPREADSHEET_ID    = "1XHXiR__p7h2JVLKNkS-F9aiKZjhar78YubQklW_baQA";
 // targeted explicitly via Settings → Target tab if you want a sandbox.
 const DEFAULT_TARGET_TAB = "DepthCharts";
 // Bump when redeploying so `GET <exec-url>` shows which build is live.
-const SCRIPT_VERSION = "2026-08-30-identity-gate";
+const SCRIPT_VERSION = "2026-09-01-multilock-aliases";
 
 // Row 4 of the target tab carries cell notes that name the JSON key for
 // each column. Row 5 is the first data row.
@@ -84,6 +85,15 @@ const AUDIT_HEADERS = ["ts", "actor_email", "action", "team", "sheet_row", "colu
 const OL_CHECKS_TAB     = "OurladsChecks";
 const OL_CHECKS_HEADERS = ["team", "checked_at", "checked_by", "ourlads_updated_at", "ourlads_updated_text"];
 
+// Shared OurLads name aliases: one row per OurLads spelling that should be
+// treated as an existing DepthCharts player (e.g. "Josh Palmer" → "Joshua
+// Palmer"). Keyed by the normalized OurLads name; the frontend applies these
+// before its OurLads-vs-chart comparison so a known spelling difference
+// stops producing "missing player" warnings for every editor. Rows are
+// hand-editable in the sheet like `Locks` — delete a row to retire an alias.
+const ALIASES_TAB     = "NameAliases";
+const ALIASES_HEADERS = ["ourlads_name", "sheet_name", "created_at", "created_by"];
+
 // Lock expires after 30 min of no heartbeat. Browser sends heartbeat every
 // 2 min; LOCK_TTL_SECONDS is the absolute idle threshold past which a peer
 // may force-take.
@@ -122,6 +132,15 @@ function doGet(e) {
       return _json({ ok: false, error: "not_authorized", email: actorEmail }, 403);
     }
     return _json(handleListOurladsChecks());
+  }
+  if (action === "listnamealiases") {
+    // Same gate: the tab holds editor emails in created_by.
+    const actorEmail = _getCallerEmail(null, e);
+    if (!actorEmail) return _json({ ok: false, error: "sign_in_required" }, 401);
+    if (EDITOR_ALLOWLIST.length > 0 && !EDITOR_ALLOWLIST.includes(actorEmail)) {
+      return _json({ ok: false, error: "not_authorized", email: actorEmail }, 403);
+    }
+    return _json(handleListNameAliases());
   }
   if (action === "whoami") {
     // Diagnostic: returns what we think the caller's identity is plus where
@@ -184,6 +203,12 @@ function doPost(e) {
         break;
       case "markourladschecked":
         result = handleMarkOurladsChecked(payload, actorEmail);
+        break;
+      case "listnamealiases":
+        result = handleListNameAliases();
+        break;
+      case "addnamealias":
+        result = handleAddNameAlias(payload, actorEmail);
         break;
       default:
         result = handleSync(payload, actorEmail);
@@ -719,16 +744,10 @@ function handleAcquireLock(payload, actorEmail) {
     const state = _readLocks(sheet);
     const now = new Date();
 
-    // Caller may not hold a different team simultaneously.
-    const mine = state.byOwner[actorEmail];
-    if (mine && mine.team !== team) {
-      return {
-        ok: false,
-        error: "already_holding_other",
-        held_team: mine.team,
-        message: "Release " + mine.team + " before locking another team.",
-      };
-    }
+    // An editor may hold locks on any number of teams at once — the sync
+    // gate requires a lock per team touched, and edit sessions legitimately
+    // span teams (e.g. a Saturday-night pass over several depth charts).
+    // The TTL + audit log keep lock-camping in check.
 
     const existing = state.byTeam[team];
     let stolenFrom = null;
@@ -768,8 +787,9 @@ function handleAcquireLock(payload, actorEmail) {
 }
 
 function handleReleaseLock(payload, actorEmail) {
+  const releaseAll = payload.all === true;
   const team = _normalizeTeam(payload.team);
-  if (!team) return { ok: false, error: "missing_team" };
+  if (!releaseAll && !team) return { ok: false, error: "missing_team" };
 
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   const scriptLock = LockService.getScriptLock();
@@ -779,6 +799,24 @@ function handleReleaseLock(payload, actorEmail) {
   try {
     const sheet = _ensureLocksSheet(ss);
     const state = _readLocks(sheet);
+
+    if (releaseAll) {
+      // Release every lock the caller owns. Delete bottom-up so row numbers
+      // cached in rowsByTeam stay valid while we go.
+      const mine = (state.byOwner[actorEmail] || []).slice();
+      mine.sort(function (a, b) { return state.rowsByTeam[b.team] - state.rowsByTeam[a.team]; });
+      const released = [];
+      const now = new Date();
+      const audits = [];
+      for (const l of mine) {
+        _removeLockRow(sheet, state, l.team);
+        released.push(l.team);
+        audits.push(_auditRow(now, actorEmail, "lock_released", l.team, null));
+      }
+      _writeAuditRows(ss, audits);
+      return { ok: true, released: released.length > 0, released_teams: released };
+    }
+
     const existing = state.byTeam[team];
     if (!existing) {
       return { ok: true, released: false, note: "no_lock_for_team" };
@@ -795,8 +833,16 @@ function handleReleaseLock(payload, actorEmail) {
 }
 
 function handleHeartbeatLock(payload, actorEmail) {
-  const team = _normalizeTeam(payload.team);
-  if (!team) return { ok: false, error: "missing_team" };
+  // Accepts either a single `team` (older clients) or a `teams` array so a
+  // browser holding several locks can heartbeat them in one request.
+  let teams = Array.isArray(payload.teams)
+    ? payload.teams.map(_normalizeTeam).filter(function (t) { return !!t; })
+    : [];
+  if (teams.length === 0) {
+    const single = _normalizeTeam(payload.team);
+    if (single) teams = [single];
+  }
+  if (teams.length === 0) return { ok: false, error: "missing_team" };
 
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   const scriptLock = LockService.getScriptLock();
@@ -806,17 +852,25 @@ function handleHeartbeatLock(payload, actorEmail) {
   try {
     const sheet = _ensureLocksSheet(ss);
     const state = _readLocks(sheet);
-    const existing = state.byTeam[team];
-    if (!existing) {
-      return { ok: false, error: "no_lock", message: "Lock for " + team + " no longer exists." };
-    }
-    if (existing.owner_email !== actorEmail) {
-      return { ok: false, error: "not_owner", owner_email: existing.owner_email };
-    }
     const now = new Date();
-    existing.last_heartbeat_at = now.toISOString();
-    _upsertLock(sheet, state, existing);
-    return { ok: true, lock: existing };
+    const refreshed = [];
+    const lost = []; // teams the caller no longer owns (released/stolen/expired-and-taken)
+    for (const team of teams) {
+      const existing = state.byTeam[team];
+      if (!existing || existing.owner_email !== actorEmail) {
+        lost.push(team);
+        continue;
+      }
+      existing.last_heartbeat_at = now.toISOString();
+      _upsertLock(sheet, state, existing);
+      refreshed.push(existing);
+    }
+    if (refreshed.length === 0) {
+      // Backwards compatible with the single-team contract older clients
+      // check for (`error === "no_lock"`).
+      return { ok: false, error: "no_lock", lost: lost, message: "None of your locks exist any more." };
+    }
+    return { ok: true, lock: refreshed[0], locks: refreshed, lost: lost };
   } finally {
     scriptLock.releaseLock();
   }
@@ -902,7 +956,10 @@ function _readLocks(sheet) {
       last_heartbeat_at: row[3] ? (row[3] instanceof Date ? row[3].toISOString() : String(row[3])) : "",
     };
     byTeam[team] = rec;
-    if (rec.owner_email) byOwner[rec.owner_email] = rec;
+    if (rec.owner_email) {
+      if (!byOwner[rec.owner_email]) byOwner[rec.owner_email] = [];
+      byOwner[rec.owner_email].push(rec);
+    }
     rowsByTeam[team] = i + 2; // header is row 1
   }
   return { byTeam, byOwner, rowsByTeam };
@@ -1080,6 +1137,110 @@ function handleMarkOurladsChecked(payload, actorEmail) {
       previous_checked_by: previous ? previous.checked_by : "",
     })]);
     return { ok: true, check: rec };
+  } finally {
+    scriptLock.releaseLock();
+  }
+}
+
+// === OurLads name aliases =================================================
+//
+// One row per OurLads spelling that maps to an existing DepthCharts player.
+// Upserted by normalized OurLads name so re-linking the same player replaces
+// the old row instead of stacking duplicates. Adding an alias does NOT
+// require a team lock (it's warning metadata, not a chart edit) but is
+// audit-logged. To retire a bad alias, delete its row in the NameAliases tab
+// by hand — same incident-response story as `Locks`.
+
+function _ensureAliasesSheet(ss) {
+  let sheet = ss.getSheetByName(ALIASES_TAB);
+  if (!sheet) {
+    sheet = ss.insertSheet(ALIASES_TAB);
+    sheet.getRange(1, 1, 1, ALIASES_HEADERS.length).setValues([ALIASES_HEADERS]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+// Mirrors _normalizeName in docs/app.js — keep the two in sync so the upsert
+// key here matches the lookup key the frontend uses.
+function _normalizeAliasKey(s) {
+  return String(s == null ? "" : s)
+    .toLowerCase()
+    .replace(/[.,'’`]/g, "")
+    .replace(/\b(jr|sr|ii|iii|iv)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function _readAliases(sheet) {
+  const lastRow = sheet.getLastRow();
+  const byKey = {};      // normalized ourlads_name -> alias rec
+  const rowsByKey = {};  // normalized ourlads_name -> sheet row for upsert
+  if (lastRow < 2) return { byKey, rowsByKey };
+  const values = sheet.getRange(2, 1, lastRow - 1, ALIASES_HEADERS.length).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i];
+    const ourladsName = String(row[0] || "").trim();
+    const key = _normalizeAliasKey(ourladsName);
+    if (!key) continue;
+    byKey[key] = {
+      ourlads_name: ourladsName,
+      sheet_name: String(row[1] || "").trim(),
+      created_at: _isoCell(row[2]),
+      created_by: String(row[3] || "").trim(),
+    };
+    rowsByKey[key] = i + 2; // header is row 1
+  }
+  return { byKey, rowsByKey };
+}
+
+function handleListNameAliases() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = _ensureAliasesSheet(ss);
+  const state = _readAliases(sheet);
+  const aliases = Object.keys(state.byKey).map(function (k) { return state.byKey[k]; });
+  return { ok: true, aliases: aliases };
+}
+
+function handleAddNameAlias(payload, actorEmail) {
+  const ourladsName = String(payload.ourlads_name || "").trim();
+  const sheetName   = String(payload.sheet_name || "").trim();
+  if (!ourladsName || !sheetName) return { ok: false, error: "missing_name" };
+  const key = _normalizeAliasKey(ourladsName);
+  if (!key) return { ok: false, error: "missing_name" };
+  if (key === _normalizeAliasKey(sheetName)) {
+    return { ok: false, error: "alias_is_identity", message: "Those names already match after normalization — no alias needed." };
+  }
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const scriptLock = LockService.getScriptLock();
+  if (!scriptLock.tryLock(5000)) {
+    return { ok: false, error: "service_busy" };
+  }
+  try {
+    const sheet = _ensureAliasesSheet(ss);
+    const state = _readAliases(sheet);
+    const now = new Date();
+    const previous = state.byKey[key] || null;
+    const rec = {
+      ourlads_name: ourladsName,
+      sheet_name: sheetName,
+      created_at: now.toISOString(),
+      created_by: actorEmail,
+    };
+    const row = [rec.ourlads_name, rec.sheet_name, rec.created_at, rec.created_by];
+    const existingRow = state.rowsByKey[key];
+    if (existingRow) {
+      sheet.getRange(existingRow, 1, 1, ALIASES_HEADERS.length).setValues([row]);
+    } else {
+      sheet.appendRow(row);
+    }
+    _writeAuditRows(ss, [_auditRow(now, actorEmail, "alias_added", "", {
+      ourlads_name: rec.ourlads_name,
+      sheet_name: rec.sheet_name,
+      previous_sheet_name: previous ? previous.sheet_name : "",
+    })]);
+    return { ok: true, alias: rec };
   } finally {
     scriptLock.releaseLock();
   }

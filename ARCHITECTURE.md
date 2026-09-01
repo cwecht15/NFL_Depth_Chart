@@ -316,35 +316,52 @@ redo pending edits afterwards.
 
 ## Multi-user safeguards
 
-Three sidecar tabs persist shared state on the same workbook:
+Four sidecar tabs persist shared state on the same workbook:
 
 - **`Locks`** — one row per actively-edited team. Columns:
   `team | owner_email | acquired_at | last_heartbeat_at`. FA is never
-  locked. Locks expire after **30 min** of no heartbeat
-  (`LOCK_TTL_SECONDS` in `sync.gs`); past the TTL a peer can take the
-  lock and the takeover is recorded as `lock_stolen` in `AuditLog`.
+  locked. An editor can hold locks on **multiple teams at once** — the
+  sync gate requires a lock per team touched by the pending edits, and
+  edit sessions legitimately span teams. Locks expire after **30 min**
+  of no heartbeat (`LOCK_TTL_SECONDS` in `sync.gs`); past the TTL a peer
+  can take the lock and the takeover is recorded as `lock_stolen` in
+  `AuditLog`.
 - **`AuditLog`** — append-only history. Columns:
   `ts | actor_email | action | team | sheet_row | column | before | after | details`.
   Actions: `edit`, `append`, `lock_acquired`, `lock_released`,
   `lock_stolen`, `lock_acquired_after_steal`, `force_release`,
-  `ourlads_checked`, and `cli_bypass` / `cli_bypass_append`. The
-  browser-sent `payload.editor` is informational only — `actor_email`
-  always comes from `Session.getActiveUser().getEmail()` on the server.
+  `ourlads_checked`, `alias_added`, and `cli_bypass` /
+  `cli_bypass_append`. The browser-sent `payload.editor` is
+  informational only — `actor_email` always comes from
+  `Session.getActiveUser().getEmail()` on the server.
 - **`OurladsChecks`** — one row per team, upserted in place. Columns:
   `team | checked_at | checked_by | ourlads_updated_at | ourlads_updated_text`.
   Written by `markOurladsChecked`, read by `listOurladsChecks`. Records
   when one of our editors last reviewed a team against OurLads and which
   OurLads "Updated" stamp they saw. Marking does not require the team's
   edit lock. See "OurLads update tracker" below.
+- **`NameAliases`** — one row per OurLads spelling that should resolve
+  to an existing DepthCharts player. Columns:
+  `ourlads_name | sheet_name | created_at | created_by`, upserted by
+  normalized OurLads name. Written by `addNameAlias` (the "Link to
+  player…" button on an OurLads missing-player warning), read by
+  `listNameAliases`. The frontend substitutes the alias before its
+  OurLads-vs-chart comparison, so a known spelling difference (e.g.
+  "Josh Palmer" vs "Joshua Palmer") stops warning for **every** editor
+  while team/position mismatch checks keep working. Delete a row by
+  hand to retire a bad alias.
 
 The browser side:
 
 - Polls `?action=listLocks` every 30 s and renders other users' holds
   inline in the team dropdown (`DAL  🔒 alice@example.com`, disabled).
-- Sends `heartbeatLock` every 2 min while a lock is held.
-- Acquires on team-select change (and via an explicit "Lock team" button
-  if you want to lock the team you're already viewing) and releases on
-  the "Release lock" button or sign-out.
+- Sends one `heartbeatLock` every 2 min carrying every held team.
+- Acquires via the explicit "Lock team" button (additive — locking CAR
+  doesn't release BUF) and releases on the contextual "Release …"
+  button or sign-out. **Sync auto-acquires** any missing locks for the
+  teams the pending edits touch before its dry-run, so a multi-team
+  edit session syncs in one go; only a team actively locked by someone
+  else blocks it.
 - Blocks edits in `recordEdit()` / `onAddPlayer()` / `onAddCustomPlayer()`
   unless the user holds the lock for `row.team` (or the row is FA).
 - Shows a stale-snapshot banner if `snapshot.json.generated_at` is older

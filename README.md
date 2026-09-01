@@ -108,16 +108,25 @@ workbook (the third, `OurladsChecks`, is described in
   The `actor_email` is **always** `Session.getActiveUser().getEmail()` — the
   browser cannot spoof it. Actions: `edit`, `append`, `lock_acquired`,
   `lock_released`, `lock_stolen`, `lock_acquired_after_steal`, `force_release`,
-  `ourlads_checked`, and `cli_bypass` / `cli_bypass_append` from
-  `tools/sync_to_sheet.py`.
+  `ourlads_checked`, `alias_added`, and `cli_bypass` / `cli_bypass_append`
+  from `tools/sync_to_sheet.py`.
+- **`NameAliases`** — one row per OurLads spelling linked to an existing
+  DepthCharts player (`ourlads_name | sheet_name | created_at | created_by`).
+  Created by the "Link to player…" button on an OurLads missing-player
+  warning; applied by every editor's browser before the OurLads comparison,
+  so a known spelling difference warns nobody. Delete a row by hand to
+  retire an alias.
 
 All sidecar tabs are auto-created on first use (you don't need to seed them).
 You can hand-edit `Locks` to clear a stuck row — the Apps Script reads it
 fresh on every request.
 
 **Behaviour at a glance.**
-- Each user can hold at most one team lock at a time. Switching teams in
-  the dropdown prompts to release the current lock first.
+- An editor can hold locks on several teams at once ("Lock team" is
+  additive; the toolbar badge lists every held team). **Sync
+  auto-acquires** any locks it's missing for the teams your pending
+  edits touch, so a session that edited BUF and CAR syncs in one go —
+  only a team actively locked by someone else blocks it.
 - Other editors see locked teams in their team dropdown as
   `DAL  🔒 alice@example.com` (disabled).
 - Free agents (`team === "FA"`) are never locked — anyone can edit FA

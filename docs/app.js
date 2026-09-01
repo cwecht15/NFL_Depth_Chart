@@ -133,8 +133,14 @@ const state = {
   olFilter: "all",        // all | recheck | checked
   olMarking: new Set(),   // teams with an in-flight "mark checked" request
 
-  // Multi-user lock state.
-  myLock: null,           // { team, owner_email, acquired_at, last_heartbeat_at }
+  // Shared OurLads name aliases (NameAliases tab): normalized OurLads name →
+  // { ourlads_name, sheet_name, created_at, created_by }. Applied before the
+  // OurLads-vs-chart comparison so known spelling differences stop warning.
+  nameAliases: {},
+
+  // Multi-user lock state. An editor can hold locks on several teams at
+  // once (sync requires a lock per team touched by pending edits).
+  myLocks: [],            // [{ team, owner_email, acquired_at, last_heartbeat_at }, ...]
   allLocks: [],           // last polled list of all locks
   locksFetchedAt: 0,      // ms timestamp
   ttlSeconds: 0,          // server-reported lock TTL (filled by listLocks)
@@ -236,6 +242,8 @@ async function launchApp() {
   await refreshLocks();
   // Shared OurLads check log — not awaited; the badge fills in when it lands.
   refreshOurladsChecks();
+  // Shared name aliases — not awaited; warnings recompute when they land.
+  refreshNameAliases();
   setInterval(refreshLocks, LOCKS_POLL_MS);
   setInterval(heartbeatTick, LOCK_HEARTBEAT_MS);
   window.addEventListener("beforeunload", onBeforeUnload);
@@ -1044,14 +1052,11 @@ function canEditRow(row) {
   if (!getSyncUrl()) return false;
   const t = (row && row.team || "").trim().toUpperCase();
   if (!t || t === FA_TEAM) return true;
-  return state.myLock && state.myLock.team === t;
+  return holdsLock(t);
 }
 function lockGateMessage(row) {
   if (!getSyncUrl()) return "Open Settings (⚙) and paste the Apps Script URL before editing.";
   const t = (row && row.team || "").trim().toUpperCase() || "this team";
-  if (state.myLock && state.myLock.team !== t) {
-    return "You hold the lock for " + state.myLock.team + ". Release it and click \"Lock " + t + "\" to edit.";
-  }
   return "Click \"Lock " + t + "\" to start editing.";
 }
 
@@ -1171,11 +1176,19 @@ function updateEditCount() {
 // Multi-user locks (browser side)
 // ---------------------------------------------------------------------------
 
+function holdsLock(team) {
+  return (state.myLocks || []).some((l) => l.team === team);
+}
+
+function heldTeams() {
+  return (state.myLocks || []).map((l) => l.team);
+}
+
 function canEditTeam(team) {
   if (!getSyncUrl()) return false;
   const t = (team || "").trim().toUpperCase();
   if (!t || t === FA_TEAM) return true;
-  return state.myLock && state.myLock.team === t;
+  return holdsLock(t);
 }
 
 async function refreshLocks() {
@@ -1191,9 +1204,10 @@ async function refreshLocks() {
     state.locksFetchedAt = Date.now();
     if (typeof body.ttl_seconds === "number") state.ttlSeconds = body.ttl_seconds;
 
-    // Reconcile myLock from server truth — another tab may have released it.
-    const mine = state.allLocks.find((l) => l.owner_email === state.authedEmail && !l.expired);
-    state.myLock = mine ? { ...mine } : null;
+    // Reconcile myLocks from server truth — another tab may have released one.
+    state.myLocks = state.allLocks
+      .filter((l) => l.owner_email === state.authedEmail && !l.expired)
+      .map((l) => ({ ...l }));
 
     syncTeamPickerLockUI();
     renderLocksPanel();
@@ -1203,17 +1217,22 @@ async function refreshLocks() {
 }
 
 async function heartbeatTick() {
-  if (!state.myLock) return;
+  if (state.myLocks.length === 0) return;
   const url = getSyncUrl();
   if (!url) return;
   try {
-    const resp = await _postToSync({ action: "heartbeatLock", team: state.myLock.team });
-    if (resp && resp.ok && resp.lock) {
-      state.myLock = { ...resp.lock };
+    const resp = await _postToSync({ action: "heartbeatLock", teams: heldTeams() });
+    if (resp && resp.ok) {
+      state.myLocks = (resp.locks || (resp.lock ? [resp.lock] : [])).map((l) => ({ ...l }));
+      const lost = resp.lost || [];
+      if (lost.length > 0) {
+        toast("Your lock on " + lost.join(", ") + " was released by another editor.", 6000);
+        syncTeamPickerLockUI();
+      }
     } else if (resp && resp.error === "no_lock") {
-      // We were force-released. Surface it.
-      const stolen = state.myLock && state.myLock.team;
-      state.myLock = null;
+      // Every lock we thought we held is gone (force-released or stolen).
+      const stolen = heldTeams().join(", ");
+      state.myLocks = [];
       toast("Your lock on " + stolen + " was released by another editor.", 6000);
       syncTeamPickerLockUI();
     }
@@ -1232,16 +1251,18 @@ async function acquireLock(team) {
   try {
     const resp = await _postToSync({ action: "acquireLock", team });
     if (resp && resp.ok && resp.lock) {
-      state.myLock = { ...resp.lock };
+      const lock = { ...resp.lock };
+      state.myLocks = state.myLocks.filter((l) => l.team !== team);
+      state.myLocks.push(lock);
       // Optimistic UI update: reflect the new lock immediately instead of
       // waiting for the next listLocks poll. The poll will reconcile any
       // drift within 30 s, but the user shouldn't see a stale toolbar.
       state.allLocks = state.allLocks.filter((l) => l.team !== team);
       state.allLocks.push({
-        team: state.myLock.team,
-        owner_email: state.myLock.owner_email,
-        acquired_at: state.myLock.acquired_at,
-        last_heartbeat_at: state.myLock.last_heartbeat_at,
+        team: lock.team,
+        owner_email: lock.owner_email,
+        acquired_at: lock.acquired_at,
+        last_heartbeat_at: lock.last_heartbeat_at,
         idle_seconds: 0,
         expired: false,
       });
@@ -1255,12 +1276,10 @@ async function acquireLock(team) {
       }
       // Background reconciliation; don't await.
       refreshLocks().catch(() => {});
-      return state.myLock;
+      return lock;
     }
     if (resp && resp.error === "locked_by_other") {
       toast(`${team} is locked by ${resp.owner_email}.`, 5000);
-    } else if (resp && resp.error === "already_holding_other") {
-      toast(`Release ${resp.held_team} first.`, 5000);
     } else if (resp && resp.error === "fa_not_lockable") {
       hideToast();
       return null;
@@ -1281,9 +1300,9 @@ async function releaseLock(team) {
     const resp = await _postToSync({ action: "releaseLock", team });
     if (resp && resp.ok) {
       // Optimistic UI update — flip the toolbar/panel immediately so the
-      // user doesn't see "Switch lock to X / 🔓 X / DAL editing" stay on
-      // screen for a few seconds while the next poll runs.
-      if (state.myLock && state.myLock.team === team) state.myLock = null;
+      // user doesn't see a stale "🔓 X" badge for a few seconds while the
+      // next poll runs.
+      state.myLocks = state.myLocks.filter((l) => l.team !== team);
       state.allLocks = state.allLocks.filter((l) => l.team !== team);
       syncTeamPickerLockUI();
       renderLocksPanel();
@@ -1300,12 +1319,41 @@ async function releaseLock(team) {
   }
 }
 
+async function releaseAllLocks() {
+  const teams = heldTeams();
+  if (teams.length === 0) return true;
+  try {
+    const resp = await _postToSync({ action: "releaseLock", all: true });
+    if (resp && resp.ok) {
+      state.myLocks = [];
+      state.allLocks = state.allLocks.filter((l) => !teams.includes(l.team));
+      syncTeamPickerLockUI();
+      renderLocksPanel();
+      renderTeamView();
+      toast(`Released lock${teams.length === 1 ? "" : "s"} on ${teams.join(", ")}.`, 3000);
+      refreshLocks().catch(() => {});
+      return true;
+    }
+    toast("Release failed: " + (resp && resp.error || "unknown"), 5000);
+    return false;
+  } catch (err) {
+    toast("Release failed: " + (err.message || err), 5000);
+    return false;
+  }
+}
+
 async function releaseCurrentLock() {
-  if (!state.myLock) { toast("No lock held.", 2000); return; }
-  const team = state.myLock.team;
+  // Contextual: releases the current team's lock when we hold it, otherwise
+  // releases everything we hold (matching the button label in
+  // syncTeamPickerLockUI).
+  if (state.myLocks.length === 0) { toast("No lock held.", 2000); return; }
+  const currentTeam = (state.currentTeam || "").trim().toUpperCase();
+  const single = holdsLock(currentTeam) ? currentTeam : null;
   const pending = state.editedRowKeys.size > 0;
-  if (pending && !confirm(`You have ${state.edits.length} unsynced edit(s). Release ${team} anyway? Edits stay in your browser.`)) return;
-  await releaseLock(team);
+  const what = single || heldTeams().join(", ");
+  if (pending && !confirm(`You have ${state.edits.length} unsynced edit(s). Release ${what} anyway? Edits stay in your browser.`)) return;
+  if (single) await releaseLock(single);
+  else await releaseAllLocks();
   syncTeamPickerLockUI();
 }
 
@@ -1313,12 +1361,9 @@ async function acquireCurrentTeamLock() {
   const team = (state.currentTeam || "").trim().toUpperCase();
   if (!team) return;
   if (team === FA_TEAM) { toast("FA isn't locked — edits go straight in.", 3000); return; }
-  if (state.myLock && state.myLock.team === team) { toast("You already hold " + team + ".", 2000); return; }
-  if (state.myLock && state.myLock.team !== team) {
-    if (!confirm(`You currently hold ${state.myLock.team}. Release it and lock ${team}?`)) return;
-    const released = await releaseLock(state.myLock.team);
-    if (!released) return;
-  }
+  if (holdsLock(team)) { toast("You already hold " + team + ".", 2000); return; }
+  // Locks are additive — holding other teams is fine; sync needs one per
+  // team touched.
   await acquireLock(team);
   syncTeamPickerLockUI();
 }
@@ -1370,15 +1415,21 @@ function syncTeamPickerLockUI() {
   const heldBadge  = document.getElementById("lock-held-badge");
   const currentTeam = (state.currentTeam || "").trim().toUpperCase();
   const isFA = currentTeam === FA_TEAM;
-  const heldByMeHere = state.myLock && state.myLock.team === currentTeam;
+  const heldByMeHere = holdsLock(currentTeam);
+  const nHeld = state.myLocks.length;
   if (acquireBtn) {
     acquireBtn.style.display = (!heldByMeHere && !isFA && getSyncUrl()) ? "inline-flex" : "none";
-    acquireBtn.textContent = state.myLock ? "Switch lock to " + currentTeam : "Lock " + currentTeam;
+    acquireBtn.textContent = "Lock " + currentTeam;
   }
-  if (releaseBtn) releaseBtn.style.display = state.myLock ? "inline-flex" : "none";
+  if (releaseBtn) {
+    releaseBtn.style.display = nHeld > 0 ? "inline-flex" : "none";
+    releaseBtn.textContent = heldByMeHere
+      ? "Release " + currentTeam
+      : (nHeld === 1 ? "Release " + state.myLocks[0].team : "Release all (" + nHeld + ")");
+  }
   if (heldBadge) {
-    if (state.myLock) {
-      heldBadge.textContent = "🔓 " + state.myLock.team;
+    if (nHeld > 0) {
+      heldBadge.textContent = "🔓 " + heldTeams().join(", ");
       heldBadge.style.display = "inline-flex";
     } else {
       heldBadge.style.display = "none";
@@ -1420,7 +1471,7 @@ function maybeShowStaleSnapshotBanner(generatedAt) {
 }
 
 function onBeforeUnload(e) {
-  if (state.myLock && state.editedRowKeys.size > 0) {
+  if (state.myLocks.length > 0 && state.editedRowKeys.size > 0) {
     e.preventDefault();
     e.returnValue = "";
     return "";
@@ -1921,17 +1972,22 @@ function computeOurladsWarnings() {
 
   for (const [team, players] of Object.entries(ol.teams)) {
     for (const p of players) {
-      const key = _normalizeName(p.name);
+      let key = _normalizeName(p.name);
       if (!key) continue;
+      // Shared alias: a known OurLads spelling difference resolves to the
+      // chart's name before matching, so team/position checks still run.
+      const alias = state.nameAliases[key];
+      if (alias && alias.sheet_name) key = _normalizeName(alias.sheet_name);
       const matches = byName.get(key) || [];
 
       if (matches.length === 0) {
         const id = `ol|missing|${_normalizeTeam(team)}|${key.replace(/\s+/g,"_")}`;
         out.push({
           id, source: "ourlads",
-          team, player: p.name,
+          team, player: p.name, olName: p.name,
           title: `OurLads: present on ${team} ${p.position || ""}${p.depth_order ? "#" + p.depth_order : ""}`,
-          detail: `OurLads lists ${p.name} on ${team} (${p.position || "?"}${p.depth_position ? " / " + p.depth_position : ""}). No row in DepthCharts.`,
+          detail: `OurLads lists ${p.name} on ${team} (${p.position || "?"}${p.depth_position ? " / " + p.depth_position : ""}). No row in DepthCharts.` +
+                  (alias ? ` (Linked name "${alias.sheet_name}" no longer matches any row.)` : ""),
         });
         continue;
       }
@@ -2042,6 +2098,8 @@ async function refreshExternalSources() {
     let n = 0;
     if (fresh_tx) { state.transactions = fresh_tx; n++; }
     if (fresh_ol) { state.ourlads = fresh_ol; n++; }
+    // Shared aliases may have changed too; rebuilds warnings again on landing.
+    refreshNameAliases();
     rebuildWarnings();
     updateOurladsBadge();
     renderOurladsPanel();
@@ -2164,6 +2222,18 @@ function renderWarning(w, isDismissed) {
     fix.textContent = "Go to row";
     fix.addEventListener("click", () => navigateToRow(w.navigate));
     actions.appendChild(fix);
+  }
+
+  if (w.olName) {
+    // Missing-player warning: offer a one-time shared alias instead of a
+    // per-browser dismissal, so the spelling difference stops warning for
+    // everyone and team/position checks keep working for this player.
+    const link = document.createElement("button");
+    link.className = "btn btn--ghost";
+    link.textContent = "Link to player…";
+    link.title = "Map this OurLads spelling to an existing DepthCharts player (shared with all editors)";
+    link.addEventListener("click", () => linkOurladsName(w));
+    actions.appendChild(link);
   }
 
   const toggle = document.createElement("button");
@@ -2330,6 +2400,61 @@ async function refreshOurladsChecks() {
   }
   updateOurladsBadge();
   renderOurladsPanel();
+}
+
+async function refreshNameAliases() {
+  const url = getSyncUrl();
+  if (!url) return; // Settings not configured; aliases just don't apply yet.
+  try {
+    const qs = "?action=listNameAliases&id_token=" + encodeURIComponent(state.idToken || "");
+    const resp = await fetch(url + qs, { redirect: "follow" });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const body = await resp.json();
+    if (!body || !body.ok) throw new Error(formatSyncError(body));
+    const map = {};
+    for (const a of body.aliases || []) {
+      const key = _normalizeName(a && a.ourlads_name);
+      if (key && a.sheet_name) map[key] = a;
+    }
+    state.nameAliases = map;
+    rebuildWarnings();
+  } catch (err) {
+    console.warn("refreshNameAliases failed:", err);
+  }
+}
+
+// "Link to player…" on an OurLads missing-player warning: record a shared
+// alias so this OurLads spelling maps to an existing DepthCharts player for
+// every editor, then recompute warnings.
+async function linkOurladsName(w) {
+  const input = prompt(
+    `OurLads lists "${w.olName}" (${w.team}) but no DepthCharts row matches.\n` +
+    `Type the player's exact DepthCharts name to link them:`,
+    w.olName
+  );
+  if (input == null) return;
+  const key = _normalizeName(input);
+  if (!key) return;
+  const rows = _rowsByName().get(key) || [];
+  if (rows.length === 0) {
+    toast(`No DepthCharts row named "${input.trim()}". Check the spelling in the chart and try again.`, 6000);
+    return;
+  }
+  const target = rows[0].displayName;
+  toast(`Linking "${w.olName}" → "${target}"…`, Infinity);
+  try {
+    const resp = await _postToSync({
+      action: "addNameAlias",
+      ourlads_name: w.olName,
+      sheet_name: target,
+    });
+    if (!resp || !resp.ok || !resp.alias) throw new Error(formatSyncError(resp));
+    state.nameAliases[_normalizeName(resp.alias.ourlads_name)] = resp.alias;
+    rebuildWarnings();
+    toast(`Linked "${w.olName}" → "${target}" for all editors.`, 4000);
+  } catch (err) {
+    toast("Couldn't save the link: " + (err.message || err), 6000);
+  }
 }
 
 async function markOurladsChecked(team) {
@@ -2727,6 +2852,39 @@ async function refreshSnapshot() {
   rebuildWarnings();
 }
 
+// Distinct non-FA teams the pending edits touch (as the rows stand now, so a
+// player edited from one team to another counts under the destination team —
+// same as the server's _teamsTouchedByDiff, which reads the payload's team).
+function _teamsWithPendingEdits() {
+  const teams = new Set();
+  for (const sheetRow of state.editedRowKeys) {
+    const row = state.rows.find((r) => r._sheet_row === sheetRow);
+    const t = row ? (row.team || "").trim().toUpperCase() : "";
+    if (t && t !== FA_TEAM) teams.add(t);
+  }
+  return [...teams];
+}
+
+// Sync spans however many teams the edit queue touches; grab any locks the
+// caller doesn't currently hold so the server's per-team lock gate passes.
+// Returns null on success, or an error message when a team is actively
+// locked by someone else.
+async function _ensureLocksForPendingEdits() {
+  const needed = _teamsWithPendingEdits().filter((t) => !holdsLock(t));
+  const blocked = [];
+  for (const team of needed) {
+    const lock = await acquireLock(team);
+    if (!lock) {
+      const other = (state.allLocks || []).find((l) => l.team === team && !l.expired);
+      blocked.push(team + (other ? " (held by " + other.owner_email + ")" : ""));
+    }
+  }
+  if (blocked.length === 0) return null;
+  return "Your edits touch " + blocked.length + " team" + (blocked.length === 1 ? "" : "s") +
+    " you can't lock right now: " + blocked.join(", ") +
+    ". Wait for the other editor to finish (or ask them to release), then Sync again.";
+}
+
 async function onSyncToSheet() {
   if (state.edits.length === 0) {
     toast("No pending edits to sync.", 3000);
@@ -2748,6 +2906,15 @@ async function onSyncToSheet() {
       phase: "error",
       message: "No edits left to sync — your pending edits were discarded because the sheet's rows moved since you made them. Please redo them.",
     });
+    return;
+  }
+  // The server requires a lock per team touched; auto-acquire any we're
+  // missing (a lock may have expired, or an edit moved a player to a team we
+  // never locked) instead of bouncing the user to do it by hand.
+  showSyncModal({ phase: "loading", message: "Checking team locks…" });
+  const lockProblem = await _ensureLocksForPendingEdits();
+  if (lockProblem) {
+    showSyncModal({ phase: "error", message: "Sync blocked — " + lockProblem });
     return;
   }
   showSyncModal({ phase: "loading", message: "Computing dry-run preview…" });
@@ -2776,7 +2943,8 @@ function formatSyncError(resp) {
     const parts = [];
     if (missing) parts.push("teams not locked by you: " + missing);
     if (others)  parts.push("teams locked by others: " + others);
-    return "Sync refused — " + (parts.join("; ") || "you don't hold the right locks.");
+    return "Sync refused — " + (parts.join("; ") || "you don't hold the right locks.") +
+      " Try Sync again (it auto-locks the teams your edits touch).";
   }
   if (resp.error === "stale_snapshot") {
     const sample = (resp.sample_stale || [])
@@ -3021,12 +3189,12 @@ function showAuthError(msg) {
 }
 
 async function signOut() {
-  // Best-effort: drop any lock we hold so peers aren't blocked.
-  if (state.myLock) {
-    try { await releaseLock(state.myLock.team); } catch {}
+  // Best-effort: drop any locks we hold so peers aren't blocked.
+  if (state.myLocks.length > 0) {
+    try { await releaseAllLocks(); } catch {}
   }
   state.authedEmail = null;
-  state.myLock = null;
+  state.myLocks = [];
   state.allLocks = [];
   if (window.google && google.accounts && google.accounts.id) {
     google.accounts.id.disableAutoSelect();
