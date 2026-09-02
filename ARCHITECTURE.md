@@ -328,7 +328,7 @@ Four sidecar tabs persist shared state on the same workbook:
   `AuditLog`.
 - **`AuditLog`** — append-only history. Columns:
   `ts | actor_email | action | team | sheet_row | column | before | after | details`.
-  Actions: `edit`, `append`, `lock_acquired`, `lock_released`,
+  Actions: `edit`, `append`, `delete`, `lock_acquired`, `lock_released`,
   `lock_stolen`, `lock_acquired_after_steal`, `force_release`,
   `ourlads_checked`, `alias_added`, and `cli_bypass` /
   `cli_bypass_append`. The browser-sent `payload.editor` is
@@ -364,6 +364,17 @@ The browser side:
   else blocks it.
 - Blocks edits in `recordEdit()` / `onAddPlayer()` / `onAddCustomPlayer()`
   unless the user holds the lock for `row.team` (or the row is FA).
+- On launch, pulls the live sheet through the Apps Script `snapshot`
+  endpoint (when configured) — GitHub throttles the 10-minute snapshot
+  cron to multi-hour gaps, and a stale static snapshot made a teammate's
+  fresh sync look reverted.
+- Row deletion: the per-row ✕ queues a deletion (undoable, persisted with
+  the edit log, identity-stamped). On commit the server re-verifies each
+  target row still holds that player (stale-refusal otherwise), requires
+  the team's lock, deletes bottom-up after updates and inserts, and
+  audit-logs `delete` rows. New-row appends are inserted below their
+  team's existing block (`insertRowsAfter`), processed in descending
+  anchor order; unknown teams fall through to the sheet's bottom.
 - Shows a stale-snapshot banner if `snapshot.json.generated_at` is older
   than 20 min and warns on `beforeunload` if you have unsynced edits with
   a lock still held.

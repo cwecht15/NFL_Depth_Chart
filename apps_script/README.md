@@ -89,7 +89,7 @@ supports `?action=listLocks`, `?action=listOurladsChecks`,
 
 | Action | What it does | Sidecar tab |
 | ------ | ------------ | ----------- |
-| `sync` | Diff + (with `commit: true`) write manual cells; mirrors to `Roster_Info` | `AuditLog` |
+| `sync` | Diff + (with `commit: true`) write manual cells; inserts new rows into their team's block (bottom for unknown teams); deletes rows listed in `payload.deletes` after re-verifying each row's identity; mirrors to `Roster_Info` | `AuditLog` |
 | `snapshot` | Read the live `DepthCharts` tab for the browser's "Refresh snapshot" | — |
 | `acquireLock` / `heartbeatLock` / `releaseLock` / `listLocks` / `forceReleaseLock` | Per-team edit locks. One editor may hold several teams; `heartbeatLock` accepts a `teams` array; `releaseLock` accepts `all: true` | `Locks`, `AuditLog` |
 | `listOurladsChecks` | Return every team's last "checked against OurLads" record | `OurladsChecks` |

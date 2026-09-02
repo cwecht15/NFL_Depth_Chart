@@ -106,10 +106,11 @@ workbook (the third, `OurladsChecks`, is described in
 - **`AuditLog`** — append-only history of edits and lock events. Columns:
   `ts | actor_email | action | team | sheet_row | column | before | after | details`.
   The `actor_email` is **always** `Session.getActiveUser().getEmail()` — the
-  browser cannot spoof it. Actions: `edit`, `append`, `lock_acquired`,
-  `lock_released`, `lock_stolen`, `lock_acquired_after_steal`, `force_release`,
-  `ourlads_checked`, `alias_added`, and `cli_bypass` / `cli_bypass_append`
-  from `tools/sync_to_sheet.py`.
+  browser cannot spoof it. Actions: `edit`, `append`, `delete`,
+  `lock_acquired`, `lock_released`, `lock_stolen`,
+  `lock_acquired_after_steal`, `force_release`, `ourlads_checked`,
+  `alias_added`, and `cli_bypass` / `cli_bypass_append` from
+  `tools/sync_to_sheet.py`.
 - **`NameAliases`** — one row per OurLads spelling linked to an existing
   DepthCharts player (`ourlads_name | sheet_name | created_at | created_by`).
   Created by the "Link to player…" button on an OurLads missing-player
@@ -127,6 +128,17 @@ fresh on every request.
   auto-acquires** any locks it's missing for the teams your pending
   edits touch, so a session that edited BUF and CAR syncs in one go —
   only a team actively locked by someone else blocks it.
+- On launch the editor pulls the **live sheet** through the Apps Script
+  (when a sync URL is configured) instead of trusting the static
+  `snapshot.json` — GitHub throttles the 10-minute snapshot cron badly,
+  so the static file can lag by hours.
+- New players sync **into their team's block** (inserted below the
+  team's last existing row); only players on teams the sheet doesn't
+  know yet land at the bottom.
+- Each row has a **✕ delete** control (lock-gated, confirm-prompted).
+  Deletion is queued — struck-through with an ↩ undo — until the next
+  sync, when the server re-verifies the row still holds that player and
+  removes the entire row. Deletions are audit-logged as `delete`.
 - Other editors see locked teams in their team dropdown as
   `DAL  🔒 alice@example.com` (disabled).
 - Free agents (`team === "FA"`) are never locked — anyone can edit FA

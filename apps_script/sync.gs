@@ -28,7 +28,7 @@ const SPREADSHEET_ID    = "1XHXiR__p7h2JVLKNkS-F9aiKZjhar78YubQklW_baQA";
 // targeted explicitly via Settings → Target tab if you want a sandbox.
 const DEFAULT_TARGET_TAB = "DepthCharts";
 // Bump when redeploying so `GET <exec-url>` shows which build is live.
-const SCRIPT_VERSION = "2026-09-01-multilock-aliases";
+const SCRIPT_VERSION = "2026-09-01-delete-team-inserts";
 
 // Row 4 of the target tab carries cell notes that name the JSON key for
 // each column. Row 5 is the first data row.
@@ -233,9 +233,29 @@ function handleSync(payload, actorEmail) {
   }
 
   const rows = Array.isArray(payload.rows) ? payload.rows : [];
+  const deletesReq = Array.isArray(payload.deletes) ? payload.deletes : [];
   const target = _readTargetTab(sheet);
 
   const { updates, appends, stale } = _computeDiff(rows, target);
+
+  // Row deletions: same identity gate as updates — the row at that number
+  // must still hold the player the client thinks it's deleting, otherwise
+  // the whole sync is refused as stale. Validated up front so nothing is
+  // written before we know every delete is safe.
+  const deletes = []; // { row, team, name }
+  for (const d of deletesReq) {
+    const sr = Number(d && d.sheet_row) || 0;
+    const cur = sr ? target.current[sr] : null;
+    if (!sr || !cur) {
+      stale.push({ row: sr, team: "", expected: _identityLabel((d && d._identity) || {}), found: "" });
+      continue;
+    }
+    if (!_rowIdentityMatches({ _identity: (d && d._identity) || {} }, cur)) {
+      stale.push({ row: sr, team: _normalizeTeam(cur.team), expected: _identityLabel((d && d._identity) || {}), found: _identityLabel(cur) });
+      continue;
+    }
+    deletes.push({ row: sr, team: _normalizeTeam(cur.team || ""), name: String(cur.displayName || "") });
+  }
 
   // Staleness gate: the client keys every row by sheet row number. If rows
   // were inserted/deleted in the sheet after the client loaded, those numbers
@@ -253,10 +273,10 @@ function handleSync(payload, actorEmail) {
     };
   }
 
-  // Lock gate: every distinct team touched by either an update or an append
+  // Lock gate: every distinct team touched by an update, append, or delete
   // (FA excluded) must be locked by the caller. Dry-runs are gated too so
   // users find out before they bother to commit.
-  const teamsTouched = _teamsTouchedByDiff(updates, appends, target, rows);
+  const teamsTouched = _teamsTouchedByDiff(updates, appends, target, rows, deletes);
   const lockCheck = _verifyCallerHoldsLocks(ss, actorEmail, teamsTouched);
   if (!lockCheck.ok) {
     return {
@@ -275,6 +295,7 @@ function handleSync(payload, actorEmail) {
     dry_run: !commit,
     updates_count: updates.length,
     appends_count: appends.length,
+    deletes_count: deletes.length,
     sample_updates: updates.slice(0, 12).map((u) => ({
       row: u.row, key: u.key,
       before: u.before, after: u.after,
@@ -285,6 +306,9 @@ function handleSync(payload, actorEmail) {
       depthPosition: r.depthPosition || "",
       eliasId:     r.eliasId || "",
     })),
+    sample_deletes: deletes.slice(0, 8).map((d) => ({
+      row: d.row, name: d.name, team: d.team,
+    })),
   };
 
   if (!commit) {
@@ -293,16 +317,24 @@ function handleSync(payload, actorEmail) {
   }
 
   const t0 = Date.now();
+  // Order matters: in-place updates first (row numbers still pristine), then
+  // team-block inserts, then deletions adjusted for the inserts above them.
   const cellsWritten = _applyUpdates(sheet, updates);
   let appendInfo = null;
   if (appends.length > 0) {
     appendInfo = _applyAppends(sheet, appends, target);
   }
+  let deletedRows = 0;
+  if (deletes.length > 0) {
+    deletedRows = _applyDeletes(sheet, deletes, appendInfo);
+  }
   summary.cells_written = cellsWritten;
   if (appendInfo) {
     summary.appended_at_row = appendInfo.startRow;
     summary.appended_rows = appendInfo.numRows;
+    summary.appended_blocks = appendInfo.blocks;
   }
+  summary.deleted_rows = deletedRows;
   summary.elapsed_ms = Date.now() - t0;
   summary.actor_email = actorEmail || null;
   // Backwards compat with earlier client builds that displayed editor_email.
@@ -310,12 +342,12 @@ function handleSync(payload, actorEmail) {
 
   // Audit-log one row per applied cell change, using the row's team from the
   // payload (the sheet update may not have included team in the diff).
-  _writeAuditRows(ss, _buildAuditEntries(updates, appends, rows, actorEmail, targetTab));
+  _writeAuditRows(ss, _buildAuditEntries(updates, appends, deletes, rows, actorEmail, targetTab));
 
   // Mirror the DepthCharts slice into Roster Info on the consumer workbook.
   // Skips on no-op commits to avoid pointless writes. Failures are non-fatal
   // — the editor's sync has already succeeded; we just surface the error.
-  if (cellsWritten > 0 || (appendInfo && appendInfo.numRows > 0)) {
+  if (cellsWritten > 0 || (appendInfo && appendInfo.numRows > 0) || deletedRows > 0) {
     try {
       const exp = _exportRosterInfo(ss);
       summary.roster_info_export = { ok: true, rows: exp.rows, cols: exp.cols, elapsed_ms: exp.elapsed_ms };
@@ -609,17 +641,11 @@ function _applyUpdates(sheet, updates) {
   return written;
 }
 
-function _applyAppends(sheet, appends, target) {
-  // Always append BELOW the last data row found in `current` so we don't
-  // overwrite anything that might exist below row 5 in the target tab.
-  const startRow = target.highestDataRow + 1;
-  const numRows  = appends.length;
-  if (numRows === 0) return { startRow, numRows };
-
-  // Build a numRows × lastCol matrix. Formula columns get empty strings so
+function _buildAppendMatrix(appendRows, target) {
+  // Build a rows × lastCol matrix. Formula columns get empty strings so
   // the row-4 ARRAYFORMULA spills into them automatically.
   const matrix = [];
-  for (const row of appends) {
+  for (const row of appendRows) {
     const line = new Array(target.lastCol).fill("");
     for (const key of Object.keys(target.keyToCol)) {
       if (!MANUAL_KEYS.has(key)) continue;
@@ -629,8 +655,97 @@ function _applyAppends(sheet, appends, target) {
     }
     matrix.push(line);
   }
-  sheet.getRange(startRow, 1, numRows, target.lastCol).setValues(matrix);
-  return { startRow, numRows };
+  return matrix;
+}
+
+function _applyAppends(sheet, appends, target) {
+  // New players are inserted directly below their team's existing block so
+  // the sheet stays organized (previously everything piled up at the bottom
+  // and someone re-sorted by hand — which shifts row numbers and discards
+  // other editors' pending edits). Teams with no existing rows, or rows with
+  // a blank team, still go below the last data row.
+  const numRows = appends.length;
+  if (numRows === 0) return { startRow: target.highestDataRow + 1, numRows, blocks: [], insertAnchors: [] };
+
+  // Last existing sheet row per team.
+  const lastRowByTeam = {};
+  for (const rowStr of Object.keys(target.current)) {
+    const rowNum = Number(rowStr);
+    const t = _normalizeTeam(target.current[rowStr].team || "");
+    if (!t) continue;
+    if (!lastRowByTeam[t] || rowNum > lastRowByTeam[t]) lastRowByTeam[t] = rowNum;
+  }
+
+  // Group appends by team, preserving payload order within each group.
+  const groups = {}; // team -> rows
+  const bottom = []; // no anchor → appended below everything
+  for (const row of appends) {
+    const t = _normalizeTeam(row.team || "");
+    if (t && lastRowByTeam[t]) {
+      if (!groups[t]) groups[t] = [];
+      groups[t].push(row);
+    } else {
+      bottom.push(row);
+    }
+  }
+
+  // Insert per-team blocks in DESCENDING anchor order: an insert only shifts
+  // rows below it, so lower anchors stay valid while we work down the sheet.
+  const anchored = Object.keys(groups)
+    .map((t) => ({ team: t, anchor: lastRowByTeam[t], rows: groups[t] }))
+    .sort((a, b) => b.anchor - a.anchor);
+  const insertAnchors = []; // { anchor, numRows } in original row numbering
+  for (const g of anchored) {
+    sheet.insertRowsAfter(g.anchor, g.rows.length);
+    sheet.getRange(g.anchor + 1, 1, g.rows.length, target.lastCol)
+      .setValues(_buildAppendMatrix(g.rows, target));
+    insertAnchors.push({ anchor: g.anchor, numRows: g.rows.length });
+  }
+
+  // Final (post-insert) start row per block: shifted down by every block
+  // inserted at a lower anchor.
+  const blocks = anchored.map((g) => {
+    let shift = 0;
+    for (const other of anchored) {
+      if (other.anchor < g.anchor) shift += other.rows.length;
+    }
+    return { team: g.team, startRow: g.anchor + 1 + shift, numRows: g.rows.length };
+  });
+
+  const totalInserted = anchored.reduce((n, g) => n + g.rows.length, 0);
+  if (bottom.length > 0) {
+    const bottomStart = target.highestDataRow + totalInserted + 1;
+    sheet.getRange(bottomStart, 1, bottom.length, target.lastCol)
+      .setValues(_buildAppendMatrix(bottom, target));
+    blocks.push({ team: "", startRow: bottomStart, numRows: bottom.length });
+  }
+
+  blocks.sort((a, b) => a.startRow - b.startRow);
+  return {
+    startRow: blocks.length ? blocks[0].startRow : target.highestDataRow + 1,
+    numRows: numRows,
+    blocks: blocks,
+    insertAnchors: insertAnchors,
+  };
+}
+
+function _applyDeletes(sheet, deletes, appendInfo) {
+  // Delete row numbers were validated against the pre-write snapshot; adjust
+  // each for the team-block inserts that landed above it, then delete
+  // bottom-up so earlier deletions don't shift the remaining targets.
+  const anchors = (appendInfo && appendInfo.insertAnchors) || [];
+  const adjusted = deletes.map((d) => {
+    let shift = 0;
+    for (const a of anchors) {
+      if (a.anchor < d.row) shift += a.numRows;
+    }
+    return { row: d.row + shift };
+  });
+  adjusted.sort((a, b) => b.row - a.row);
+  for (const d of adjusted) {
+    sheet.deleteRow(d.row);
+  }
+  return adjusted.length;
 }
 
 function _toCellString(v) {
@@ -1018,9 +1133,11 @@ function _verifyCallerHoldsLocks(ss, actorEmail, teamsTouched) {
   return { ok: missing.length === 0 && heldByOthers.length === 0, missing: missing, heldByOthers: heldByOthers };
 }
 
-function _teamsTouchedByDiff(updates, appends, target, payloadRows) {
+function _teamsTouchedByDiff(updates, appends, target, payloadRows, deletes) {
   // For updates we need to look up the team for each touched sheet_row. The
-  // payload's `rows` array is the authoritative team-per-row source.
+  // payload's `rows` array is the authoritative team-per-row source. Deleted
+  // rows are excluded from the payload, so their team comes from the sheet
+  // itself (resolved during delete validation).
   const teamByRow = {};
   for (const r of payloadRows || []) {
     const sr = Number(r._sheet_row) || 0;
@@ -1035,6 +1152,9 @@ function _teamsTouchedByDiff(updates, appends, target, payloadRows) {
   for (const a of appends) {
     const t = _normalizeTeam(a.team);
     if (t) set[t] = true;
+  }
+  for (const d of deletes || []) {
+    if (d.team) set[d.team] = true;
   }
   return Object.keys(set);
 }
@@ -1272,7 +1392,7 @@ function _auditRow(now, actorEmail, action, team, details) {
   ];
 }
 
-function _buildAuditEntries(updates, appends, payloadRows, actorEmail, targetTab) {
+function _buildAuditEntries(updates, appends, deletes, payloadRows, actorEmail, targetTab) {
   const now = new Date();
   const ts = now.toISOString();
   const teamByRow = {};
@@ -1294,6 +1414,13 @@ function _buildAuditEntries(updates, appends, payloadRows, actorEmail, targetTab
       ts, actorEmail, "append", _normalizeTeam(a.team),
       "", "displayName", "", String(a.displayName || ""),
       JSON.stringify({ target_tab: targetTab, eliasId: a.eliasId || "", position: a.position || "" }),
+    ]);
+  }
+  for (const d of deletes || []) {
+    out.push([
+      ts, actorEmail, "delete", d.team,
+      d.row, "displayName", d.name, "",
+      JSON.stringify({ target_tab: targetTab }),
     ]);
   }
   return out;

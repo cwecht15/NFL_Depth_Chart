@@ -356,6 +356,27 @@ select { min-width: 100px; }
 .tbl tbody tr.drop-above td { box-shadow: inset 0 2px 0 0 var(--accent); }
 .tbl tbody tr.drop-below td { box-shadow: inset 0 -2px 0 0 var(--accent); }
 
+/* Per-row delete / undo control (below the drag grip). */
+.tbl td.col--drag .row-delete-btn {
+  display: block;
+  margin: 2px auto 0;
+  padding: 2px 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.tbl td.col--drag .row-delete-btn:hover:not(:disabled) { color: var(--danger, #e5534b); background: rgba(229, 83, 75, 0.12); }
+.tbl td.col--drag .row-delete-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* Row queued for deletion: struck through, read-only until synced or undone. */
+.tbl tbody tr.row--deleted td { opacity: 0.5; text-decoration: line-through; }
+.tbl tbody tr.row--deleted td.col--drag { text-decoration: none; opacity: 1; }
+.tbl tbody tr.row--deleted td.col--drag .row-delete-btn { color: var(--accent); font-size: 0.9rem; }
+
 /* Per-column min widths so text inputs aren't truncated to "Marvin H". */
 .tbl th[data-col="displayName"],        .tbl td[data-col="displayName"]        { min-width: 200px; }
 .tbl th[data-col="firstName"],          .tbl td[data-col="firstName"]          { min-width: 110px; }

@@ -116,6 +116,7 @@ const state = {
   baseline: new Map(),    // sheet_row -> original row (for diff)
   editedRowKeys: new Set(),  // sheet_rows that have been edited
   edits: [],              // chronological edit log
+  deletes: [],            // pending row deletions: { sheet_row, ident, team, displayName, ts, who }
   currentTeam: null,
   currentCategory: null,
   authedEmail: null,
@@ -251,6 +252,12 @@ async function launchApp() {
   // Initial state for the team picker: if we previously held a lock for this
   // team in another tab/session, surface it on first paint.
   syncTeamPickerLockUI();
+
+  // GitHub throttles the 10-minute snapshot cron badly (gaps of hours), so
+  // snapshot.json alone can show a chart from before a teammate's sync. When
+  // a sync URL is configured, pull the live sheet in the background so the
+  // session starts from reality; the static snapshot is just the fast paint.
+  if (getSyncUrl()) refreshSnapshot().catch(() => {});
 }
 
 function migrateUnNamespacedLS() {
@@ -340,8 +347,9 @@ function renderShell() {
   });
 
   document.getElementById("reset-btn").addEventListener("click", () => {
-    if (!confirm("Discard ALL in-memory edits? This cannot be undone.")) return;
+    if (!confirm("Discard ALL in-memory edits (including queued deletes)? This cannot be undone.")) return;
     state.edits = [];
+    state.deletes = [];
     state.editedRowKeys.clear();
     state.rows = state.snapshot.depth.rows.map(r => ({ ...r }));
     persistEdits();
@@ -576,6 +584,8 @@ function renderRow(r) {
   tr.dataset.team = (r.team || "").trim();
   if (state.editedRowKeys.has(r._sheet_row)) tr.classList.add("row--edited");
   if (isPlaceholder(r.eliasId)) tr.classList.add("row--placeholder");
+  const pendingDelete = state.deletes.some(d => d.sheet_row === r._sheet_row);
+  if (pendingDelete) tr.classList.add("row--deleted");
 
   // Drag handle (leading column). Only the grip is draggable, so clicking
   // inputs/selects elsewhere in the row still focuses them normally.
@@ -586,7 +596,7 @@ function renderRow(r) {
   grip.className = "drag-grip";
   grip.textContent = "⋮⋮";
   const editable = canEditRow(r);
-  grip.draggable = editable;
+  grip.draggable = editable && !pendingDelete;
   grip.title = editable
     ? `Drag to reorder ${r.displayName || "this player"} within ${r.depthPosition || "this position"}`
     : lockGateMessage(r);
@@ -594,6 +604,26 @@ function renderRow(r) {
   grip.addEventListener("dragstart", onGripDragStart);
   grip.addEventListener("dragend", onGripDragEnd);
   dragTd.appendChild(grip);
+
+  // Delete / undo control. Deleting a browser-added row removes it outright;
+  // deleting a real sheet row queues the deletion until the next sync.
+  if (getSyncUrl()) {
+    const del = document.createElement("button");
+    del.className = "row-delete-btn";
+    if (pendingDelete) {
+      del.textContent = "↩";
+      del.title = "Undo delete — keep this row";
+      del.addEventListener("click", () => undoDeleteRow(r._sheet_row));
+    } else {
+      del.textContent = "✕";
+      del.title = editable
+        ? "Delete this player's row from the sheet (queued until you sync)"
+        : lockGateMessage(r);
+      del.disabled = !editable;
+      del.addEventListener("click", () => queueDeleteRow(r._sheet_row));
+    }
+    dragTd.appendChild(del);
+  }
   tr.appendChild(dragTd);
 
   // Drop targets live on the row itself — the grip is just the source.
@@ -608,8 +638,11 @@ function renderRow(r) {
     if (key === "eliasId" || key === "gsisId" || key === "playerId") td.classList.add("col--id");
     if (key === "displayName") td.classList.add("col--name");
 
-    if (MANUAL_KEYS.has(key)) {
+    if (MANUAL_KEYS.has(key) && !pendingDelete) {
       td.appendChild(renderEditableCell(r, key));
+    } else if (pendingDelete) {
+      td.classList.add("col--readonly");
+      td.textContent = r[key] ?? "";
     } else {
       td.classList.add("col--readonly");
       const val = r[key] ?? "";
@@ -1006,6 +1039,56 @@ function recordEdit(row, key, newValue) {
   rebuildWarnings();
 }
 
+// --- Row deletion ----------------------------------------------------------
+//
+// A browser-added row that was never synced just disappears (with its edit
+// log). A real sheet row is queued: shown struck-through with an undo, and
+// the server deletes the whole row on the next committed sync (after
+// re-verifying the row still holds the same player).
+
+function queueDeleteRow(sheetRow) {
+  const row = state.rows.find(r => r._sheet_row === sheetRow);
+  if (!row) return;
+  if (!canEditRow(row)) { toast(lockGateMessage(row), 4000); return; }
+  const name = row.displayName || "this player";
+
+  if (isVirtualSheetRow(sheetRow)) {
+    if (!confirm(`Remove ${name}? This row hasn't been synced yet, so it just goes away.`)) return;
+    state.rows = state.rows.filter(r => r._sheet_row !== sheetRow);
+    state.edits = state.edits.filter(e => e.sheet_row !== sheetRow);
+    state.editedRowKeys.delete(sheetRow);
+  } else {
+    if (!confirm(
+      `Delete ${name} (${row.team || "?"})?\n\n` +
+      `The entire row is removed from the sheet on your next sync. ` +
+      `You can undo until then with the ↩ button.`
+    )) return;
+    // Pending edits on a row headed for deletion are moot — drop them so the
+    // sync payload doesn't try to update a row it's also deleting.
+    state.edits = state.edits.filter(e => e.sheet_row !== sheetRow);
+    state.editedRowKeys.delete(sheetRow);
+    state.deletes.push({
+      sheet_row: sheetRow,
+      ident: editIdentity(row),
+      team: (row.team || "").trim().toUpperCase(),
+      displayName: row.displayName || "",
+      ts: new Date().toISOString(),
+      who: state.authedEmail || "anon",
+    });
+  }
+  persistEdits();
+  updateEditCount();
+  renderTeamView();
+  rebuildWarnings();
+}
+
+function undoDeleteRow(sheetRow) {
+  state.deletes = state.deletes.filter(d => d.sheet_row !== sheetRow);
+  persistEdits();
+  updateEditCount();
+  renderTeamView();
+}
+
 function maybePromptCategoryUpgrade(row) {
   const currentCat = (row.depthPositionCategory || "").trim().toUpperCase();
   if (currentCat && currentCat !== "PS") return;  // only auto-suggest for PS/blank
@@ -1064,6 +1147,7 @@ function persistEdits() {
   try {
     const payload = {
       edits: state.edits,
+      deletes: state.deletes,
       ts: new Date().toISOString(),
     };
     localStorage.setItem(lsKeyEdits(), JSON.stringify(payload));
@@ -1078,6 +1162,7 @@ function restoreEditsFromLocalStorage() {
     if (!raw) return;
     const payload = JSON.parse(raw);
     state.edits = payload.edits || [];
+    state.deletes = payload.deletes || [];
     applyEditsToRows();
   } catch (err) {
     console.warn("Could not parse saved edits:", err);
@@ -1153,12 +1238,39 @@ function applyEditsToRows() {
       12000
     );
   }
+
+  // Same protection for queued deletions: a delete whose target row no
+  // longer holds the same player must not fire — drop it and say so.
+  if (state.deletes.length > 0) {
+    const keptDeletes = [];
+    const staleDeletes = [];
+    for (const d of state.deletes) {
+      const r = byRow.get(d.sheet_row);
+      if (r && identityMatchesRow(d.ident, r)) keptDeletes.push(d);
+      else staleDeletes.push(d);
+    }
+    if (staleDeletes.length > 0) {
+      state.deletes = keptDeletes;
+      persistEdits();
+      updateEditCount();
+      const names = staleDeletes.map(d => d.displayName || ("row " + d.sheet_row));
+      toast(
+        `${staleDeletes.length} queued delete${staleDeletes.length === 1 ? "" : "s"} discarded — the sheet's rows ` +
+        `moved (${names.slice(0, 4).join(", ")}${names.length > 4 ? ", …" : ""}). Please redo them.`,
+        12000
+      );
+    }
+  }
 }
 
 function updateEditCount() {
-  const n = state.edits.length;
+  const nEdits = state.edits.length;
+  const nDeletes = state.deletes.length;
+  const n = nEdits + nDeletes;
   const el = document.getElementById("edit-count");
-  el.textContent = `${n} edit${n === 1 ? "" : "s"}`;
+  el.textContent = nDeletes > 0
+    ? `${nEdits} edit${nEdits === 1 ? "" : "s"} · ${nDeletes} delete${nDeletes === 1 ? "" : "s"}`
+    : `${nEdits} edit${nEdits === 1 ? "" : "s"}`;
   el.classList.toggle("badge--muted", n === 0);
   el.classList.toggle("badge--accent", n > 0);
   // Reflect the same state on the Sync button so the user can see at a
@@ -1349,9 +1461,9 @@ async function releaseCurrentLock() {
   if (state.myLocks.length === 0) { toast("No lock held.", 2000); return; }
   const currentTeam = (state.currentTeam || "").trim().toUpperCase();
   const single = holdsLock(currentTeam) ? currentTeam : null;
-  const pending = state.editedRowKeys.size > 0;
+  const nPending = state.edits.length + state.deletes.length;
   const what = single || heldTeams().join(", ");
-  if (pending && !confirm(`You have ${state.edits.length} unsynced edit(s). Release ${what} anyway? Edits stay in your browser.`)) return;
+  if (nPending > 0 && !confirm(`You have ${nPending} unsynced change(s). Release ${what} anyway? Changes stay in your browser.`)) return;
   if (single) await releaseLock(single);
   else await releaseAllLocks();
   syncTeamPickerLockUI();
@@ -1471,7 +1583,7 @@ function maybeShowStaleSnapshotBanner(generatedAt) {
 }
 
 function onBeforeUnload(e) {
-  if (state.myLocks.length > 0 && state.editedRowKeys.size > 0) {
+  if (state.myLocks.length > 0 && (state.editedRowKeys.size > 0 || state.deletes.length > 0)) {
     e.preventDefault();
     e.returnValue = "";
     return "";
@@ -2742,7 +2854,10 @@ function setSettingsStatus(msg, kind) {
 function _buildSyncPayload(extra) {
   const keys = state.snapshot.depth.keys.slice();
   const labelMap = state.snapshot.depth.key_to_label || {};
-  const rows = state.rows.map((r) => {
+  // Rows queued for deletion are excluded from the value diff and sent
+  // separately with their baseline identity so the server can re-verify.
+  const deleteSet = new Set(state.deletes.map(d => d.sheet_row));
+  const rows = state.rows.filter((r) => !deleteSet.has(r._sheet_row)).map((r) => {
     const out = {};
     for (const k of Object.keys(r)) {
       if (k === "_sheet_row" || !k.startsWith("_")) out[k] = r[k];
@@ -2768,6 +2883,7 @@ function _buildSyncPayload(extra) {
     edit_count: state.edits.length,
     edited_row_count: state.editedRowKeys.size,
     rows,
+    deletes: state.deletes.map(d => ({ sheet_row: d.sheet_row, _identity: d.ident })),
     target_tab: getTargetTab(),
   }, extra || {});
 }
@@ -2862,6 +2978,9 @@ function _teamsWithPendingEdits() {
     const t = row ? (row.team || "").trim().toUpperCase() : "";
     if (t && t !== FA_TEAM) teams.add(t);
   }
+  for (const d of state.deletes) {
+    if (d.team && d.team !== FA_TEAM) teams.add(d.team);
+  }
   return [...teams];
 }
 
@@ -2886,7 +3005,7 @@ async function _ensureLocksForPendingEdits() {
 }
 
 async function onSyncToSheet() {
-  if (state.edits.length === 0) {
+  if (state.edits.length === 0 && state.deletes.length === 0) {
     toast("No pending edits to sync.", 3000);
     return;
   }
@@ -2901,7 +3020,7 @@ async function onSyncToSheet() {
   // means the preview reflects other people's changes since we loaded.
   showSyncModal({ phase: "loading", message: "Refreshing from sheet…" });
   await refreshSnapshot();
-  if (state.edits.length === 0) {
+  if (state.edits.length === 0 && state.deletes.length === 0) {
     showSyncModal({
       phase: "error",
       message: "No edits left to sync — your pending edits were discarded because the sheet's rows moved since you made them. Please redo them.",
@@ -2976,6 +3095,17 @@ async function _syncCommit() {
     // the same edits on top of the fresh data.
     state.edits = [];
     state.editedRowKeys.clear();
+    if (state.deletes.length > 0 && typeof result.deleted_rows !== "number") {
+      // Old Apps Script deployment: it ignored payload.deletes entirely.
+      // Keep the queue so nothing is silently lost, and say why.
+      toast(
+        "Row deletions were NOT applied — the Apps Script deployment predates them. " +
+        "Redeploy sync.gs, then Sync again (your queued deletes are kept).",
+        12000
+      );
+    } else {
+      state.deletes = [];
+    }
     persistEdits();
     updateEditCount();
     // Pull fresh data so newly-appended rows pick up their real sheet
@@ -3011,8 +3141,11 @@ function showSyncModal({ phase, message, result }) {
     const r = result;
     title.textContent = `Preview: ${r.target_tab}`;
     body.appendChild(_renderSyncSummary(r));
-    const apply = _modalButton(`Apply ${r.updates_count} updates + ${r.appends_count} new rows`, "btn--primary", _syncCommit);
-    if (r.updates_count + r.appends_count === 0) apply.disabled = true;
+    const nDel = r.deletes_count || 0;
+    const parts = [`${r.updates_count} updates`, `${r.appends_count} new rows`];
+    if (nDel > 0) parts.push(`${nDel} delete${nDel === 1 ? "" : "s"}`);
+    const apply = _modalButton(`Apply ${parts.join(" + ")}`, "btn--primary", _syncCommit);
+    if (r.updates_count + r.appends_count + nDel === 0) apply.disabled = true;
     foot.appendChild(apply);
     foot.appendChild(_modalButton("Cancel", "btn--ghost", closeSyncModal));
     return;
@@ -3020,9 +3153,13 @@ function showSyncModal({ phase, message, result }) {
   if (phase === "done") {
     const r = result;
     title.textContent = `Synced to ${r.target_tab}`;
+    const blocks = (r.appended_blocks || [])
+      .map((b) => `${b.numRows} at row ${b.startRow}${b.team ? ` (${escapeHTML(b.team)})` : ""}`)
+      .join(", ");
     const summary = document.createElement("p");
     summary.innerHTML = `Wrote <strong>${r.cells_written ?? 0}</strong> cells; appended <strong>${r.appended_rows ?? 0}</strong> new rows`
-      + (r.appended_at_row ? ` starting at row ${r.appended_at_row}` : "")
+      + (blocks ? ` (${blocks})` : (r.appended_at_row ? ` starting at row ${r.appended_at_row}` : ""))
+      + ((r.deleted_rows ?? 0) > 0 ? `; deleted <strong>${r.deleted_rows}</strong> row${r.deleted_rows === 1 ? "" : "s"}` : "")
       + (typeof r.elapsed_ms === "number" ? ` in ${r.elapsed_ms} ms` : "")
       + (r.actor_email ? ` as <code>${escapeHTML(r.actor_email)}</code>` : "")
       + ".";
@@ -3039,7 +3176,9 @@ function closeSyncModal() {
 function _renderSyncSummary(r) {
   const wrap = document.createElement("div");
   const head = document.createElement("p");
-  head.innerHTML = `<strong>${r.updates_count}</strong> rows with updates &middot; <strong>${r.appends_count}</strong> new rows to append.`;
+  head.innerHTML = `<strong>${r.updates_count}</strong> rows with updates &middot; <strong>${r.appends_count}</strong> new rows to append`
+    + ((r.deletes_count || 0) > 0 ? ` &middot; <strong>${r.deletes_count}</strong> rows to delete` : "")
+    + ".";
   wrap.appendChild(head);
 
   // Lookup by sheet row so we can surface the affected player on each change.
@@ -3101,6 +3240,24 @@ function _renderSyncSummary(r) {
           elias <code>${escapeHTML(a.eliasId || match.eliasId || "")}</code>
           &middot; gsis <code>${escapeHTML(match.gsisId || "")}</code>
         </div>
+      `;
+      ul.appendChild(li);
+    }
+    wrap.appendChild(ul);
+  }
+  if (r.sample_deletes && r.sample_deletes.length) {
+    const h = document.createElement("h3"); h.textContent = "Rows to delete";
+    wrap.appendChild(h);
+    const ul = document.createElement("ul"); ul.className = "sync-list";
+    for (const d of r.sample_deletes) {
+      const li = document.createElement("li");
+      li.className = "sync-list__row";
+      li.innerHTML = `
+        <div class="sync-list__player">
+          − <strong>${escapeHTML(d.name || "(unknown player)")}</strong>
+          <span class="sync-list__tag">${escapeHTML(d.team || "—")}</span>
+        </div>
+        <div class="sync-list__change">row <code>${d.row}</code> — entire row removed</div>
       `;
       ul.appendChild(li);
     }
