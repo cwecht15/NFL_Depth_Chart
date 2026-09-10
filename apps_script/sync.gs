@@ -53,6 +53,7 @@ const EDITOR_ALLOWLIST = [
   "chriscashmusic@gmail.com",
   "pitaroproductions@gmail.com",
   "isaachoule30@gmail.com",
+  "jaredsnewton@gmail.com",
 ];
 
 // Admins who may call forceReleaseLock to clear someone else's lock without
